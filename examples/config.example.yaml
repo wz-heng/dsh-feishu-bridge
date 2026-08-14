@@ -1,0 +1,33 @@
+# Non-secret configuration only. Credentials (FEISHU_APP_ID, FEISHU_APP_SECRET,
+# FEISHU_VERIFICATION_TOKEN, FEISHU_ENCRYPT_KEY, DEEPSEEK_API_KEY) are read
+# from the environment ONLY — they are never read from this file, so this
+# file is safe to commit alongside your deployment (once you fill in real
+# allowlist ids).
+#
+# Point the bridge at this file with:
+#   dsh-feishu-bridge --config examples/config.example.yaml
+# or:
+#   export DSH_FEISHU_BRIDGE_CONFIG=/path/to/config.yaml
+#
+# Every field here can also be set as an env var (see README "Configuration
+# reference"); env vars always win when both are set.
+
+feishu:
+  transport: ws  # "ws" (no public URL needed) or "webhook"
+  domain: https://open.feishu.cn
+  # Fail-closed: leave empty and the bridge answers no one.
+  allowed_open_ids:
+    - ou_replace_with_your_open_id
+  allowed_chat_ids: []  # empty = no group restriction (still gated by @-mention)
+
+dsh:
+  provider: deepseek-official
+  model: deepseek-v4-flash
+  max_tokens: null
+  cordis: null          # path to a custom Cordis composition; null = bundled default
+  session_root: null    # where the dsh runtime writes JSONL session logs
+  workspace: null        # cwd available to the agent's tools; null = process cwd
+
+server:
+  host: 0.0.0.0
+  port: 8788

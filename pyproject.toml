@@ -1,0 +1,64 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dsh-feishu-bridge"
+version = "0.1.0"
+description = "Feishu (Lark) channel bridge for DeepSeek Harness (dsh) — a community IM plugin, not an official DeepSeek project."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+authors = [{ name = "dsh-feishu-bridge contributors" }]
+keywords = ["deepseek-harness", "dsh-plugin", "feishu", "lark", "chatbot", "agent"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+]
+
+# Both third-party dependencies are pinned to an EXACT version on purpose:
+# deepseek-harness-sdk is a v0.1 developer preview that documents breaking
+# changes between releases, and lark-channel-sdk is the same exact pin Owlery
+# runs in production. Bumping either is a deliberate, tested decision — never
+# a side effect of a routine `pip install -U`.
+dependencies = [
+  "deepseek-harness-sdk==0.1.0rc6",
+  "deepseek-harness-runtime-bin==0.1.0rc6",
+  "lark-channel-sdk==1.2.0",
+  "fastapi>=0.115,<1.0",
+  "uvicorn>=0.32,<1.0",
+  "pydantic>=2.7,<3.0",
+  "requests>=2.31,<3.0",
+  "PyYAML>=6.0,<7.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/deepseek-ai/deepseek-harness"
+
+[project.scripts]
+dsh-feishu-bridge = "dsh_feishu_bridge.__main__:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0,<9.0",
+  "pytest-asyncio>=0.24,<1.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dsh_feishu_bridge"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+# Plain `pytest` never spends API quota, even if DEEPSEEK_API_KEY happens to
+# be set in the environment — the real_sdk smoke test is opt-in only, via
+# `pytest -m real_sdk` (which overrides this default).
+addopts = "-m 'not real_sdk'"
+markers = [
+  "real_sdk: hits the real deepseek-harness runtime; needs DEEPSEEK_API_KEY, run explicitly with -m real_sdk",
+]
