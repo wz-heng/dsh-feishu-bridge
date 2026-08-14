@@ -2,8 +2,8 @@
 target: it answers the token endpoint, records every message-send / card-PATCH
 the bridge issues, and returns benign success envelopes for everything else.
 
-No product code runs here. Mirrors Owlery's web/e2e/fake-feishu-server.mjs
-(the fake this bridge's design was ported from) but as a Python
+No product code runs here. Mirrors the fake Feishu server used by the bridge
+this design was ported from, but as a Python
 ``http.server`` so this repo's test suite needs no JS toolchain.
 """
 
