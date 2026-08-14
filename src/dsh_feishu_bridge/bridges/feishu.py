@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
 from lark_channel import FeishuChannel, SecurityConfig, TransportConfig
+from lark_channel.core.utils import AESCipher
 import lark_channel.ws.client as _lark_ws_client
 
 from .base import Bridge
@@ -44,6 +45,22 @@ MAX_LIVE_NONCES = 2000
 _WEBHOOK_TIMESTAMP_HEADER = "x-lark-request-timestamp"
 _WEBHOOK_NONCE_HEADER = "x-lark-request-nonce"
 _WEBHOOK_SIGNATURE_HEADER = "x-lark-signature"
+
+# The SDK's OWN (now-redundant, but still exercised) internal signature check
+# does a CASE-SENSITIVE header lookup for these same three headers, keyed by
+# its exact mixed-case constant names — while ASGI frameworks (Starlette /
+# FastAPI, see app.py's `dict(request.headers)`) hand us headers already
+# normalized to all-lowercase. This mismatch was invisible while encrypt_key
+# was optional (an unset key made the SDK's `_verify_sign` a no-op regardless
+# of headers), but now that encrypt_key is mandatory for webhook transport
+# the SDK's check DOES run — and every legitimate, correctly-signed request
+# would 500 inside it without restoring canonical casing first (see
+# _with_canonical_signature_header_case / handle_webhook).
+_SDK_SIGNATURE_HEADER_CASE = {
+    _WEBHOOK_TIMESTAMP_HEADER: "X-Lark-Request-Timestamp",
+    _WEBHOOK_NONCE_HEADER: "X-Lark-Request-Nonce",
+    _WEBHOOK_SIGNATURE_HEADER: "X-Lark-Signature",
+}
 
 # How far a request's timestamp may drift from wall-clock "now" and still be
 # accepted. Matches the source bridge's own webhook convention.
@@ -217,9 +234,11 @@ class FeishuBridge(Bridge):
         self.transport = transport
         self._app_id = app_id
         self._app_secret = app_secret
-        # Our OWN copy, used by _verify_webhook_request — never delegated to
-        # the SDK (see handle_webhook / build_feishu_bridge).
+        # Our OWN copies, used by _verify_webhook_request and the
+        # URL-verification handshake responder — never delegated to the SDK
+        # (see handle_webhook / build_feishu_bridge).
         self._encrypt_key = encrypt_key
+        self._verification_token = verification_token
         self._domain = domain.rstrip("/")
         # Fail-closed allowlists: an empty/None open_id set means the
         # `_authorized` gate rejects EVERY sender and operator — there is no
@@ -592,14 +611,119 @@ class FeishuBridge(Bridge):
         (and therefore before it can reach ``manager.handle_incoming``).
 
         Only a request that PASSES is handed to the SDK dispatcher, which
-        then does its own decrypt / verification-token / challenge / routing
-        to our registered handlers — that part is unaffected.
+        then does its own decrypt / challenge / routing to our registered
+        handlers — that part is unaffected.
+
+        ONE deliberate exception: Feishu's URL-verification handshake — the
+        "save request URL" step in the console, fired the moment you
+        configure or change the webhook URL — is never signed, because at
+        that point no subscription is confirmed yet for there to be anything
+        to sign. Gating it like a normal event would permanently block
+        first-time webhook setup.
+
+        This bridge answers that handshake itself (see
+        _respond_to_url_verification) rather than forwarding it to the SDK.
+        Forwarding it would be safe for a PLAINTEXT handshake (the SDK's own
+        dispatcher checks verification_token before it ever looks at request
+        type, and its url_verification branch returns before
+        `_verify_sign`/`_dispatch` are reachable), but NOT for an
+        ENCRYPTED-but-unsigned handshake — the realistic case now that
+        encrypt_key is mandatory: the SDK's own strict-mode
+        `_preverify_encrypted_request` blocks any encrypted payload lacking
+        signature headers before the url_verification branch is ever
+        reached, so a real deployment's first webhook save would 500.
+        Answering it ourselves — decrypt (if needed) with our own
+        encrypt_key, check verification_token, echo the challenge —
+        sidesteps that SDK behavior entirely and works identically for both
+        the legacy flat body and the v2/p2-schema body Feishu also uses for
+        this handshake.
         """
+        payload = self._decode_url_verification_challenge(body)
+        if payload is not None:
+            return self._respond_to_url_verification(payload)
         ok, reason = self._verify_webhook_request(headers, body)
         if not ok:
             logger.warning("Feishu: webhook request rejected (%s)", reason)
             return 401, b'{"code":401,"msg":"unauthorized"}'
-        return await self._channel.handle_webhook_request(headers, body)
+        return await self._channel.handle_webhook_request(
+            self._with_canonical_signature_header_case(headers), body
+        )
+
+    def _decode_url_verification_challenge(self, body: bytes) -> dict[str, Any] | None:
+        """The decrypted/parsed JSON payload if `body` is Feishu's
+        URL-verification handshake, else None.
+
+        Recognizes both shapes the SDK's own `_parse_context` treats as
+        `url_verification` — the legacy flat body (`{"type":
+        "url_verification", ...}`) and the v2/p2-schema body (`{"schema":
+        "2.0", "header": {"event_type": "url_verification", ...}, ...}`) —
+        across plaintext or AES-encrypted (using our own encrypt_key, the
+        SDK's own `AESCipher`). Best-effort: any parse/decrypt failure or
+        unrecognized shape returns None, which just routes the request
+        through the normal signed-event gate instead (fails closed, never
+        open)."""
+        try:
+            payload = json.loads(body)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        encrypted = payload.get("encrypt")
+        if encrypted:
+            if not self._encrypt_key:
+                return None
+            try:
+                payload = json.loads(AESCipher(self._encrypt_key).decrypt_str(encrypted))
+            except Exception:
+                return None
+            if not isinstance(payload, dict):
+                return None
+        event_type = payload.get("type")
+        header = payload.get("header")
+        if not event_type and isinstance(header, dict):
+            event_type = header.get("event_type")
+            # v2/p2-schema carries verification_token at header.token, not
+            # top-level — normalize so _respond_to_url_verification only
+            # ever has to look in one place (mirrors the SDK's own
+            # `context.token = context.header.token` for this schema).
+            if "token" not in payload and "token" in header:
+                payload["token"] = header["token"]
+        if event_type != "url_verification":
+            return None
+        return payload
+
+    def _respond_to_url_verification(self, payload: dict[str, Any]) -> tuple[int, bytes]:
+        """Answer a decoded URL-verification handshake ourselves: check
+        verification_token (the same, pre-existing, mandatory-for-webhook
+        check the SDK would otherwise perform — an attacker who doesn't know
+        it gets nothing from this path either), then echo the challenge
+        Feishu sent, matching what `EventDispatcherHandler.do` would return
+        for this request type."""
+        token = payload.get("token")
+        if self._verification_token and not (
+            isinstance(token, str) and hmac.compare_digest(self._verification_token, token)
+        ):
+            logger.warning(
+                "Feishu: webhook request rejected (invalid verification_token on url_verification)"
+            )
+            return 401, b'{"code":401,"msg":"unauthorized"}'
+        challenge = payload.get("challenge")
+        if not isinstance(challenge, str):
+            logger.warning("Feishu: webhook request rejected (url_verification missing challenge)")
+            return 401, b'{"code":401,"msg":"unauthorized"}'
+        return 200, json.dumps({"challenge": challenge}).encode("utf-8")
+
+    @staticmethod
+    def _with_canonical_signature_header_case(headers: dict[str, str]) -> dict[str, str]:
+        """Re-add the three signature headers under the exact mixed-case
+        names the SDK's own (redundant) internal check looks them up by —
+        see _SDK_SIGNATURE_HEADER_CASE for why this is necessary."""
+        lowered = {k.lower(): v for k, v in headers.items()}
+        out = dict(headers)
+        for lower_name, canonical_name in _SDK_SIGNATURE_HEADER_CASE.items():
+            if lower_name in lowered:
+                out[canonical_name] = lowered[lower_name]
+        return out
 
     def _verify_webhook_request(
         self, headers: dict[str, str], body: bytes

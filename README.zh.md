@@ -98,7 +98,7 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 
 - **默认 fail-closed。** 不配置 `FEISHU_ALLOWED_OPEN_IDS` 意味着所有发送者都被拒绝——没有隐式的"允许所有人"。这是刻意设计：一个白名单为空的 agent 桥如果默认放行，会让租户里任何人都能触发任意 agent turn。
 - **webhook 模式必须同时配置 verification token 和 encrypt key。** 缺任一项，webhook 路由根本不会注册——进程宁可拒绝以半配置状态启动,也不会默默接受未经验证的事件。encrypt key 不是可选项：verification token 只是请求体里携带的一个静态值，不是逐请求的签名,单靠它无法证明请求真的来自飞书。
-- **每个 webhook 请求都在本 bridge 自己的边界上做签名、时间戳、重放校验**——校验先于任何下游 SDK 处理。`X-Lark-Signature` 会按 `sha256(timestamp + nonce + encrypt_key + body)` 校验；timestamp 必须落在距"现在"5 分钟的窗口内；同一个 `(timestamp, nonce)` 组合如果已经出现过，会被当作重放拒绝。任一校验失败都直接返回 `401`,请求不会到达消息处理逻辑。
+- **每个 webhook 请求都在本 bridge 自己的边界上做签名、时间戳、重放校验**——校验先于任何下游 SDK 处理。`X-Lark-Signature` 会按 `sha256(timestamp + nonce + encrypt_key + body)` 校验；timestamp 必须落在距"现在"5 分钟的窗口内；同一个 `(timestamp, nonce)` 组合如果已经出现过，会被当作重放拒绝。任一校验失败都直接返回 `401`,请求不会到达消息处理逻辑。唯一刻意放行的例外是飞书控制台"保存请求网址"这一步的握手请求：此时订阅尚未确认，飞书根本不会为它签名，因此本 bridge 只校验 `FEISHU_VERIFICATION_TOKEN` 并直接回显 challenge——这与底层 SDK 原本就会做的那次(已强制要求的)校验完全等价。
 - **卡片按钮（会话切换）使用一次性、绑定身份的 nonce。** nonce 铸造时精确绑定某个 action + session；二次点击、重放的 nonce、被篡改的卡片 value 都会被拒绝且不生效。
 - **会话归创建它的聊天所有。** `/sessions` 只列出（`/switch` 也只接受）发起请求的聊天自己拥有的会话——即便两个聊天都在白名单里，也不能列出或劫持另一个聊天的会话 id 来偷看它的回复。
 - 用这个 bridge 的进程时用composition 实际需要的最小权限运行。内置默认的 `dsh` composition（`examples/jsonrpc-agent` 上游）用的是 `danger-full-access` 的 bash + 文件编辑——请在一次性工作区/容器里跑，不要对着你在意的机器跑。

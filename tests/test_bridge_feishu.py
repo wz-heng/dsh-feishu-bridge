@@ -20,13 +20,17 @@ lifecycle.
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import json
+import os
 import threading
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from Crypto.Cipher import AES
 
 from lark_channel.channel.types import (
     CardActionEvent,
@@ -310,6 +314,42 @@ class TestWebhookVerification:
         status, _ = await b.handle_webhook(lowered, self.BODY)
         assert status == 200
 
+    async def test_canonical_case_restored_before_forwarding_to_sdk(self):
+        """The SDK's OWN internal signature check does a case-sensitive
+        header lookup for X-Lark-Request-Timestamp/-Nonce/X-Lark-Signature,
+        but ASGI frameworks hand us headers already lowercased. Invisible
+        while encrypt_key was optional (the SDK's check no-opped); now that
+        it's mandatory the check runs for real, so every legitimate request
+        must be forwarded with the exact mixed case the SDK looks up."""
+        b = self._bridge()
+        now = str(int(time.time()))
+        headers = _webhook_headers(self.BODY, timestamp=now, nonce="n1")
+        lowered = {k.lower(): v for k, v in headers.items()}
+        status, _ = await b.handle_webhook(lowered, self.BODY)
+        assert status == 200
+        forwarded_headers = b._channel.handle_webhook_request.await_args.args[0]
+        assert forwarded_headers["X-Lark-Request-Timestamp"] == now
+        assert forwarded_headers["X-Lark-Request-Nonce"] == "n1"
+        assert forwarded_headers["X-Lark-Signature"] == lowered["x-lark-signature"]
+
+    async def test_canonical_case_restore_does_not_500_on_the_real_sdk_check(self):
+        """End-to-end proof against the REAL SDK signature check (not a
+        mock): a lowercased-header request must reach and pass
+        EventDispatcherHandler._verify_sign without a 500, the exact bug a
+        case-sensitive lookup against lowercased ASGI headers caused once
+        encrypt_key became mandatory. Webhook mode's start_background()
+        returns ready without dialing out, so this needs no network."""
+        b = _make_bridge()
+        await b._channel.start_background()
+        body = self.BODY
+        now = str(int(time.time()))
+        nonce = "n-real-sdk"
+        headers = _webhook_headers(body, timestamp=now, nonce=nonce)
+        lowered = {k.lower(): v for k, v in headers.items()}
+        status, content = await b.handle_webhook(lowered, body)
+        assert status == 200
+        assert b"success" in content
+
     async def test_replay_rejected_even_at_future_skew_and_ttl_edge(self, monkeypatch):
         """Snape's should-finding: a receipt-time-only nonce-cache TTL leaves
         a gap. A request signed up to WEBHOOK_TIMESTAMP_WINDOW_SECONDS in the
@@ -389,6 +429,178 @@ class TestWebhookVerification:
         status2, _ = await b.handle_webhook(headers, self.BODY)
         assert status2 != 200
         assert b._channel.handle_webhook_request.await_count == 1
+
+
+# --------------------------------------------------------------------------
+# URL-verification handshake: Feishu's "save request URL" console step fires
+# an UNSIGNED challenge request — plaintext, or AES-encrypted with
+# encrypt_key (the realistic case now that encrypt_key is mandatory for
+# webhook transport), in either the legacy flat shape ({"type":
+# "url_verification", ...}) or the v2/p2-schema shape ({"schema": "2.0",
+# "header": {"event_type": "url_verification", ...}, ...}). The bridge
+# answers this ITSELF, never forwarding to the SDK: the SDK's own
+# strict-mode encrypted-payload preverify blocks any encrypted body lacking
+# signature headers before its url_verification branch is ever reached, so
+# forwarding would 500 on the first webhook save of any real deployment.
+# `_channel.handle_webhook_request` is mocked only to prove it is NEVER
+# called for a handshake — the response is produced entirely by our own
+# code, so these tests exercise the real path, not a stand-in for the SDK.
+# --------------------------------------------------------------------------
+
+
+def _aes_encrypt(key: str, plaintext: str) -> str:
+    """The exact reverse of lark_channel's AESCipher.decrypt — used only to
+    build a realistic encrypted url_verification body for these tests."""
+    digest = hashlib.sha256(key.encode("utf-8")).digest()
+    iv = os.urandom(16)
+    raw = plaintext.encode("utf-8")
+    pad_len = 16 - (len(raw) % 16)
+    padded = raw + bytes([pad_len]) * pad_len
+    cipher = AES.new(digest, AES.MODE_CBC, iv)
+    return base64.b64encode(iv + cipher.encrypt(padded)).decode("ascii")
+
+
+class TestUrlVerificationHandshake:
+    def _bridge(self) -> FeishuBridge:
+        b = _make_bridge()
+        b._channel.handle_webhook_request = AsyncMock(
+            return_value=(200, b'{"msg":"success"}')
+        )
+        return b
+
+    async def test_unsigned_plaintext_flat_challenge_answered_directly(self):
+        b = self._bridge()
+        body = json.dumps(
+            {"challenge": "chal-123", "token": "vtok", "type": "url_verification"}
+        ).encode("utf-8")
+        status, content = await b.handle_webhook({}, body)
+        assert status == 200
+        assert json.loads(content) == {"challenge": "chal-123"}
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_unsigned_plaintext_v2_schema_challenge_answered_directly(self):
+        # The SDK's own _parse_context also treats this shape as
+        # url_verification via header.event_type — must be recognized too,
+        # not just the flat legacy shape.
+        b = self._bridge()
+        body = json.dumps(
+            {
+                "schema": "2.0",
+                "header": {"event_type": "url_verification", "token": "vtok"},
+                "challenge": "chal-v2",
+            }
+        ).encode("utf-8")
+        status, content = await b.handle_webhook({}, body)
+        assert status == 200
+        assert json.loads(content) == {"challenge": "chal-v2"}
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_unsigned_encrypted_flat_challenge_answered_directly(self):
+        b = self._bridge()
+        plaintext = json.dumps(
+            {"challenge": "chal-enc", "token": "vtok", "type": "url_verification"}
+        )
+        body = json.dumps({"encrypt": _aes_encrypt("ekey", plaintext)}).encode("utf-8")
+        status, content = await b.handle_webhook({}, body)
+        assert status == 200
+        assert json.loads(content) == {"challenge": "chal-enc"}
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_unsigned_encrypted_v2_schema_challenge_answered_directly(self):
+        b = self._bridge()
+        plaintext = json.dumps(
+            {
+                "schema": "2.0",
+                "header": {"event_type": "url_verification", "token": "vtok"},
+                "challenge": "chal-v2-enc",
+            }
+        )
+        body = json.dumps({"encrypt": _aes_encrypt("ekey", plaintext)}).encode("utf-8")
+        status, content = await b.handle_webhook({}, body)
+        assert status == 200
+        assert json.loads(content) == {"challenge": "chal-v2-enc"}
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_wrong_verification_token_on_plaintext_handshake_rejected(self):
+        # An attacker who doesn't know verification_token gets nothing from
+        # this path either — the same (pre-existing, mandatory-for-webhook)
+        # check the SDK would have performed, now done by us directly.
+        b = self._bridge()
+        body = json.dumps(
+            {"challenge": "chal-123", "token": "WRONG", "type": "url_verification"}
+        ).encode("utf-8")
+        status, _ = await b.handle_webhook({}, body)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_wrong_verification_token_on_encrypted_handshake_rejected(self):
+        b = self._bridge()
+        plaintext = json.dumps(
+            {"challenge": "chal-enc", "token": "WRONG", "type": "url_verification"}
+        )
+        body = json.dumps({"encrypt": _aes_encrypt("ekey", plaintext)}).encode("utf-8")
+        status, _ = await b.handle_webhook({}, body)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_missing_challenge_field_rejected(self):
+        b = self._bridge()
+        body = json.dumps({"token": "vtok", "type": "url_verification"}).encode("utf-8")
+        status, _ = await b.handle_webhook({}, body)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_encrypted_challenge_with_wrong_key_does_not_bypass_gate(self):
+        # Can't be decrypted with OUR encrypt_key -> not recognized as a
+        # handshake -> falls through to the normal signed-event gate, which
+        # rejects it for missing signature headers (fails closed, not open).
+        b = self._bridge()
+        plaintext = json.dumps({"type": "url_verification", "challenge": "x", "token": "vtok"})
+        body = json.dumps({"encrypt": _aes_encrypt("wrong-key", plaintext)}).encode("utf-8")
+        status, _ = await b.handle_webhook({}, body)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_normal_event_without_signature_still_rejected(self):
+        # The bypass is url_verification-only: a normal event shape still
+        # requires a valid signature — it is not enough to merely lack one.
+        b = self._bridge()
+        body = json.dumps(
+            {"schema": "2.0", "header": {"event_type": "im.message.receive_v1", "token": "vtok"}}
+        ).encode("utf-8")
+        status, _ = await b.handle_webhook({}, body)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_malformed_body_does_not_bypass_gate(self):
+        b = self._bridge()
+        status, _ = await b.handle_webhook({}, b"not json")
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_real_sdk_would_500_on_encrypted_handshake_forwarded_bare(self):
+        """Proof the bypass is load-bearing against the REAL SDK (not a
+        mock): if this bridge instead forwarded an encrypted, unsigned
+        handshake straight to `_channel.handle_webhook_request` — as a
+        naive fix that only special-cased plaintext would — the SDK's own
+        strict-mode `_preverify_encrypted_request` blocks it before
+        `url_verification` is ever reached, producing a 500. This bridge
+        must never take that path; it answers the handshake itself instead
+        (see `_decode_url_verification_challenge` /
+        `_respond_to_url_verification`)."""
+        b = _make_bridge()
+        await b._channel.start_background()
+        plaintext = json.dumps(
+            {"challenge": "chal-direct", "token": "vtok", "type": "url_verification"}
+        )
+        body = json.dumps({"encrypt": _aes_encrypt("ekey", plaintext)}).encode("utf-8")
+        status, content = await b._channel.handle_webhook_request({}, body)
+        assert status == 500
+
+        # Our own bridge, going through handle_webhook, must not hit that.
+        status, content = await b.handle_webhook({}, body)
+        assert status == 200
+        assert json.loads(content) == {"challenge": "chal-direct"}
 
 
 # --------------------------------------------------------------------------
