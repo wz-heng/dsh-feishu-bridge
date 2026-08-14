@@ -1,0 +1,52 @@
+{
+  "name": "dsh-feishu-bridge",
+  "version": "0.1.0",
+  "description": "DSH plugin shell for dsh-feishu-bridge: spawns and supervises the Feishu (Lark) channel bridge's Python process as a managed child of the DSH Host. The bridge itself is unchanged Python — this package only adds the dsh.bundle install path.",
+  "type": "module",
+  "main": "lib/index.mjs",
+  "exports": {
+    ".": {
+      "default": "./lib/index.mjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "README.zh.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "scripts": {
+    "test": "node --test tests-node/**/*.test.mjs"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "feishu",
+    "lark",
+    "bridge",
+    "agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wz-heng/dsh-feishu-bridge.git"
+  },
+  "homepage": "https://github.com/wz-heng/dsh-feishu-bridge",
+  "bugs": {
+    "url": "https://github.com/wz-heng/dsh-feishu-bridge/issues"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1"
+  }
+}

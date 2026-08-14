@@ -1,0 +1,15 @@
+# dsh-feishu-bridge bundle patch: inserts the plugin row that spawns and
+# supervises the Python bridge process. Installed via `dsh plugin add
+# dsh-feishu-bridge` (or a git/path source before an npm release); the
+# patch layer is hot-applied through Cordis (watchUserPatches) without a
+# server restart.
+#
+# The row carries no default `config:` — every field the plugin reads
+# (host/port/pythonBin/env overrides) has a sane default resolved against
+# the installed package's own directory (see lib/index.mjs), so a bare
+# install works with no row edits. A profile that needs a different
+# interpreter or port overrides this same id in its own cordis.patch.yml —
+# the last write per id wins.
+- insert:
+    - id: feishu-bridge
+      name: dsh-feishu-bridge

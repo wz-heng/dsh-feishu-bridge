@@ -58,6 +58,45 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 
 把这个 `open_id` 填进 `FEISHU_ALLOWED_OPEN_IDS`，重启即可。
 
+## 作为 dsh 插件安装
+
+除了上面独立运行的方式，`dsh plugin add` 也可以把本仓库装进某个 `dsh` profile：插件是一层薄的 Node/cordis 壳（`package.json`、`cordis.patch.yml`、`lib/`），负责拉起并管理同一个未经改动的 Python 进程——不重实现、也不 patch 任何桥逻辑。
+
+**两步，顺序不能反——插件不会替你装任何 Python 依赖：**
+
+1. **先按上面"快速上手"把 Python 侧装好：**
+
+   ```sh
+   git clone https://github.com/wz-heng/dsh-feishu-bridge.git
+   cd dsh-feishu-bridge
+   python3.12 -m venv .venv
+   . .venv/bin/activate
+   pip install -e .
+   ```
+
+   配置 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_ALLOWED_OPEN_IDS` 等——可以 export 到启动 `dsh` 的 shell 里，也可以写进本仓库根目录的 `.env` 文件（每行 `KEY=value`；插件会直接读取它并合并进被拉起进程的环境变量，因为 Python 侧本身只读 `process.env`）。
+
+2. **再把插件加进 profile：**
+
+   ```sh
+   dsh plugin --profile <name> add /path/to/dsh-feishu-bridge
+   ```
+
+   之后该 profile 每次启动，`dsh` 都会把这个桥当作受管子进程拉起：它会执行 `<repo>/.venv/bin/python -m dsh_feishu_bridge`（仓库根目录没有 `.venv` 时回退到 `PATH` 上的 `python3`），等待 `GET /health` 返回 `{"status": "ok"}`，并在 profile/插件 dispose 时发送 `SIGTERM`，若 5 秒内未退出则升级为 `SIGKILL`——和手动 `Ctrl-C` 独立进程时的干净退出行为一致，只是自动化了。
+
+   每个 config 字段都是可选的（`host`、`port`、`pythonBin`、`startupTimeoutMs`、`env`）——只要第一步做好了，且默认值（`0.0.0.0:8788`、仓库根 `.venv`）符合你的环境，裸 `add` 就能直接工作。如需覆盖，在你自己 profile 的 `cordis.patch.yml` 里改同一个 id，例如换解释器：
+
+   ```yaml
+   - insert:
+       - id: feishu-bridge
+         name: dsh-feishu-bridge
+         config:
+           pythonBin: /usr/local/bin/python3.12
+           port: 8799
+   ```
+
+这层壳是 v1：无构建步骤（`lib/` 下是纯 ESM）、零 npm 依赖，且不会自动引导 Python 环境——目前已收录的、包装外部进程的 dsh 插件里没有这么做的先例，本仓库也就不自创一个。壳自己的测试在 `tests-node/` 下（`node --test tests-node/**/*.test.mjs`），与 `tests/` 下的 Python 测试套件相互独立。
+
 ## 命令
 
 | 命令 | 作用 |
@@ -124,6 +163,12 @@ pytest -m real_sdk           # 真机冒烟测试：需要 DEEPSEEK_API_KEY + ru
 测试套件把两端都 fake 掉了：一个可编排的 `DshBackend` 顶替真实 SDK（不起子进程、不烧配额），一个本地 `FakeFeishuServer` 顶替 `open.feishu.cn`，断言 bridge 实际发出的出站请求。见 `tests/`。
 
 如果你的网络走代理（比如 Clash）且没有为 `127.0.0.1`/`localhost` 配置豁免，运行涉及 loopback 服务器的测试前先 `export no_proxy=127.0.0.1,localhost`——否则代理会吞掉 bridge 自己发往 fake server 的出站请求。bridge 本身在运行时已经对 loopback 域名强制 `trust_env=False`，所以这只影响测试进程。
+
+dsh 插件壳（`lib/`，见上面"作为 dsh 插件安装"）有自己独立的 JS 测试套件，不涉及 Python：
+
+```sh
+node --test tests-node/**/*.test.mjs
+```
 
 ## License
 

@@ -58,6 +58,45 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 
 Copy that `open_id` into `FEISHU_ALLOWED_OPEN_IDS` and restart.
 
+## Install as a dsh plugin
+
+Instead of running the standalone process above, `dsh plugin add` can install this repo into a `dsh` profile: the plugin is a thin Node/cordis shell (`package.json`, `cordis.patch.yml`, `lib/`) that spawns and supervises the same unmodified Python process — it does not reimplement or patch any bridge logic.
+
+**Two steps, in order — the plugin never installs Python dependencies for you:**
+
+1. **Install the Python side yourself first**, exactly as in the Quickstart above:
+
+   ```sh
+   git clone https://github.com/wz-heng/dsh-feishu-bridge.git
+   cd dsh-feishu-bridge
+   python3.12 -m venv .venv
+   . .venv/bin/activate
+   pip install -e .
+   ```
+
+   Set `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_ALLOWED_OPEN_IDS` / etc. — either exported in the shell that starts `dsh`, or in a `.env` file at this repo's root (`KEY=value` per line; the plugin reads it directly and merges it into the spawned process's environment, since the Python side itself only reads `process.env`).
+
+2. **Then add the plugin to your profile:**
+
+   ```sh
+   dsh plugin --profile <name> add /path/to/dsh-feishu-bridge
+   ```
+
+   `dsh` starts the bridge as a managed child the next time that profile boots: it spawns `<repo>/.venv/bin/python -m dsh_feishu_bridge` (falling back to `python3` on `PATH` if no `.venv` exists at the repo root), waits for `GET /health` to report `{"status": "ok"}`, and on profile/plugin dispose sends `SIGTERM`, escalating to `SIGKILL` if the process hasn't exited within 5 seconds — the same clean-shutdown behavior as `Ctrl-C`-ing the standalone process, just automatic.
+
+   Every row config field is optional (`host`, `port`, `pythonBin`, `startupTimeoutMs`, `env`) — a bare `add` with no row edits works as long as step 1 is done and the defaults (`0.0.0.0:8788`, repo-root `.venv`) match your setup. Override in your profile's own `cordis.patch.yml`, e.g. to point at a different interpreter:
+
+   ```yaml
+   - insert:
+       - id: feishu-bridge
+         name: dsh-feishu-bridge
+         config:
+           pythonBin: /usr/local/bin/python3.12
+           port: 8799
+   ```
+
+This wrapper is v1: no build step (plain ESM under `lib/`), zero npm dependencies, and it never bootstraps a Python environment — there's no established convention for that among installable dsh plugins wrapping an external process today, so this repo doesn't invent one. Its own tests live under `tests-node/` (`node --test tests-node/**/*.test.mjs`), separate from the Python suite in `tests/`.
+
 ## Commands
 
 | Command | What it does |
@@ -124,6 +163,12 @@ pytest -m real_sdk           # real smoke test: needs DEEPSEEK_API_KEY + the run
 The test suite fakes both edges: a scripted `DshBackend` stands in for the real SDK (no subprocess spawned, no quota spent), and a local `FakeFeishuServer` stands in for `open.feishu.cn` to assert what the bridge actually sends outbound. See `tests/`.
 
 If your network runs through a proxy (e.g. Clash) without a `127.0.0.1`/`localhost` exemption, export `no_proxy=127.0.0.1,localhost` before running the loopback-server tests — otherwise the proxy can swallow the bridge's own outbound calls to the fake server. The bridge itself already forces `trust_env=False` for loopback domains at runtime, so this only matters for the test process.
+
+The dsh plugin shell (`lib/`, see "Install as a dsh plugin" above) has its own, separate JS test suite — no Python involved:
+
+```sh
+node --test tests-node/**/*.test.mjs
+```
 
 ## License
 
