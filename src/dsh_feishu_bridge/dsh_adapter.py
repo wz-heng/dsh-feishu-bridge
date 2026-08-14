@@ -133,24 +133,50 @@ class DshAdapter:
 
     async def run_turn(self, session_id: str, text: str) -> DshTurnResult:
         harness = await self._ensure_started()
+        loop = asyncio.get_running_loop()
         self._inflight += 1
         self._idle.clear()
+
+        def _blocking_call():
+            # Bookkeeping happens HERE, inside the worker thread's own
+            # finally, not in a try/finally around the `await` below.
+            # SessionManager.shutdown() cancels the awaiting Task before
+            # calling close(); cancelling a Task awaiting
+            # asyncio.to_thread(...) raises CancelledError in this coroutine
+            # immediately, but does NOT stop this thread — harness.run() just
+            # keeps running in the background. A finally around the `await`
+            # would therefore decrement _inflight (and set _idle) the moment
+            # the Task is cancelled, not when the thread actually finishes,
+            # letting close() run harness.close() while this call is still
+            # live (Snape review round 3). Scheduling the decrement from
+            # inside the thread via call_soon_threadsafe ties it to the
+            # thread's real completion instead.
+            try:
+                return harness.run(text, session_id=session_id)
+            finally:
+                try:
+                    loop.call_soon_threadsafe(self._turn_finished)
+                except RuntimeError:
+                    pass  # event loop already closed; nothing left to update
+
         try:
-            result = await asyncio.to_thread(
-                harness.run, text, session_id=session_id
-            )
+            result = await asyncio.to_thread(_blocking_call)
         except HarnessError as exc:
             logger.exception("dsh turn failed for session %s", session_id)
             raise DshAdapterError(str(exc)) from exc
-        finally:
-            self._inflight -= 1
-            if self._inflight == 0:
-                self._idle.set()
         return DshTurnResult(
             session_id=result.session_id,
             text=result.final_response,
             finish_reason=result.finish_reason,
         )
+
+    def _turn_finished(self) -> None:
+        """Runs on the event loop (via call_soon_threadsafe from the worker
+        thread) once a blocking harness.run() call has actually returned."""
+        self._inflight -= 1
+        if self._inflight <= 0:
+            self._inflight = 0
+            self._idle.set()
 
     async def close(self, *, wait_timeout: float = 30.0) -> None:
         """Close the harness subprocess.

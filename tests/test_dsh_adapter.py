@@ -152,6 +152,53 @@ async def test_close_waits_for_inflight_turn_before_closing_harness(monkeypatch)
     assert order == ["run_returned", "closed"]
 
 
+async def test_close_waits_even_when_the_run_task_was_cancelled_first(monkeypatch):
+    # This is the path SessionManager.shutdown() actually exercises: it
+    # cancels the awaiting Task BEFORE calling close(). Round-2's fix tracked
+    # in-flight state via a try/finally around the `await` in run_turn() —
+    # but cancelling that await raises CancelledError in run_turn()
+    # immediately, running its finally right away, even though the
+    # underlying worker thread is still inside harness.run(). That let
+    # close() proceed and call harness.close() while the thread was still
+    # live. The fix (round 3) ties the in-flight bookkeeping to the thread's
+    # OWN completion via call_soon_threadsafe, so it must survive the task
+    # being cancelled out from under it.
+    started = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+
+    class SlowHarness(_StubHarness):
+        def run(self, text: str, *, session_id: str):
+            started.set()
+            release.wait(timeout=2.0)
+            order.append("run_returned")
+            return super().run(text, session_id=session_id)
+
+        def close(self) -> None:
+            order.append("closed")
+            super().close()
+
+    monkeypatch.setattr(dsh_adapter_module, "DeepSeekHarness", SlowHarness)
+    adapter = DshAdapter(DshAdapterConfig())
+
+    run_task = asyncio.create_task(adapter.run_turn("s1", "hello"))
+    await asyncio.to_thread(started.wait, 2.0)
+    assert started.is_set(), "run() never started on its worker thread"
+
+    run_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await run_task
+    assert order == [], "cancelling the task must not itself unblock close()"
+
+    close_task = asyncio.create_task(adapter.close(wait_timeout=2.0))
+    await asyncio.sleep(0.05)
+    assert order == [], "close() closed the harness before the cancelled turn's thread actually finished"
+
+    release.set()
+    await close_task
+    assert order == ["run_returned", "closed"]
+
+
 async def test_close_force_closes_after_timeout_instead_of_hanging(monkeypatch):
     release = threading.Event()  # deliberately never set within the test
 
