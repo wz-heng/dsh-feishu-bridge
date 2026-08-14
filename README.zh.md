@@ -14,7 +14,7 @@
 ## 5 分钟快速上手
 
 ```sh
-git clone <this-repo-url> dsh-feishu-bridge
+git clone https://github.com/wz-heng/dsh-feishu-bridge.git
 cd dsh-feishu-bridge
 python3.12 -m venv .venv
 . .venv/bin/activate

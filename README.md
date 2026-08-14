@@ -14,7 +14,7 @@ A Feishu (Lark) channel bridge for [DeepSeek Harness](https://github.com/deepsee
 ## Quickstart (5 minutes)
 
 ```sh
-git clone <this-repo-url> dsh-feishu-bridge
+git clone https://github.com/wz-heng/dsh-feishu-bridge.git
 cd dsh-feishu-bridge
 python3.12 -m venv .venv
 . .venv/bin/activate
