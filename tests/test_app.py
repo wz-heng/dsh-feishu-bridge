@@ -18,6 +18,7 @@ def _settings(**over) -> Settings:
         feishu_app_secret="sec",
         feishu_transport="webhook",
         feishu_verification_token="vtok",
+        feishu_encrypt_key="ekey",
         feishu_domain="http://127.0.0.1:9",
         feishu_allowed_open_ids=["ou_me"],
     )
