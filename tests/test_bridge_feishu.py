@@ -355,6 +355,41 @@ class TestWebhookVerification:
         assert status != 200
         assert len(b._webhook_nonces) == 0
 
+    async def test_timestamp_exactly_at_window_boundary_rejected(self, monkeypatch):
+        """Snape's second should-finding: a diff of EXACTLY
+        WEBHOOK_TIMESTAMP_WINDOW_SECONDS used to be accepted, which gave the
+        nonce-cache entry a TTL of exactly 0 — evicted as "expired" the
+        instant the very next check ran, so an immediate replay of the same
+        boundary request sailed straight through untouched."""
+        b = self._bridge()
+        wall = 1_000_000.0
+        monkeypatch.setattr(time, "time", lambda: wall)
+        monkeypatch.setattr(time, "monotonic", lambda: 0.0)
+
+        ts = str(int(wall) - 300)  # diff == 300 exactly
+        headers = _webhook_headers(self.BODY, timestamp=ts, nonce="edge")
+
+        status1, _ = await b.handle_webhook(headers, self.BODY)
+        assert status1 != 200
+        status2, _ = await b.handle_webhook(headers, self.BODY)
+        assert status2 != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_timestamp_just_inside_window_accepted_and_replay_rejected(self, monkeypatch):
+        b = self._bridge()
+        wall = 1_000_000.0
+        monkeypatch.setattr(time, "time", lambda: wall)
+        monkeypatch.setattr(time, "monotonic", lambda: 0.0)
+
+        ts = str(int(wall) - 299)  # diff == 299, just inside the window
+        headers = _webhook_headers(self.BODY, timestamp=ts, nonce="edge2")
+
+        status1, _ = await b.handle_webhook(headers, self.BODY)
+        assert status1 == 200
+        status2, _ = await b.handle_webhook(headers, self.BODY)
+        assert status2 != 200
+        assert b._channel.handle_webhook_request.await_count == 1
+
 
 # --------------------------------------------------------------------------
 # Inbound: fail-closed authorization + routing

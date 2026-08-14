@@ -628,7 +628,14 @@ class FeishuBridge(Bridge):
         except ValueError:
             return False, "timestamp malformed"
         now_wall = time.time()
-        if abs(now_wall - ts) > WEBHOOK_TIMESTAMP_WINDOW_SECONDS:
+        # Strictly `<` (not `<=`), not just for the window's own sake: a
+        # diff exactly at WEBHOOK_TIMESTAMP_WINDOW_SECONDS would give the
+        # nonce-cache entry below a TTL of exactly 0 — evicted as "expired"
+        # the instant the very next request is checked, defeating replay
+        # rejection for a request sitting right on the boundary. Rejecting
+        # the boundary itself guarantees every accepted request's cache
+        # entry gets strictly positive headroom.
+        if abs(now_wall - ts) >= WEBHOOK_TIMESTAMP_WINDOW_SECONDS:
             return False, "timestamp outside window"
 
         # Only a request that already passed signature + timestamp consumes a
