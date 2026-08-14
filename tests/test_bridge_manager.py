@@ -203,6 +203,67 @@ class TestCommands:
         await manager.handle_incoming("mock", "c1", "/help", bridge)
         assert "/new" in bridge.sent[-1][2]["text"]
 
+
+class TestSessionOwnership:
+    """A session created by one chat must not be listable or switchable by
+    another chat — Snape's blocker: process-global /sessions + no ownership
+    check on /switch let any allowlisted chat hijack another chat's session
+    and start receiving its broadcasts."""
+
+    async def test_sessions_only_shows_own(
+        self, manager: BridgeManager, bridge: MockBridge, session_mgr: SessionManager
+    ):
+        await manager.handle_incoming("mock", "c1", "hello", bridge)
+        await _drain(session_mgr, bridge)
+        await manager.handle_incoming("mock", "c2", "hello", bridge)
+        await _drain(session_mgr, bridge)
+
+        bridge.sent.clear()
+        await manager.handle_incoming("mock", "c1", "/sessions", bridge)
+        listing = [s for s in bridge.sent if s[0] == "send_session_list"][-1]
+        ids = {item["id"] for item in listing[2]["sessions"]}
+        assert ids == {manager.get_session_id("mock", "c1")}
+
+    async def test_switch_to_other_chats_session_rejected(
+        self, manager: BridgeManager, bridge: MockBridge, session_mgr: SessionManager
+    ):
+        await manager.handle_incoming("mock", "c1", "hello", bridge)
+        await _drain(session_mgr, bridge)
+        owned_by_c1 = manager.get_session_id("mock", "c1")
+
+        await manager.handle_incoming("mock", "c2", f"/switch {owned_by_c1}", bridge)
+        assert "not found" in bridge.sent[-1][2]["text"]
+        assert manager.get_session_id("mock", "c2") is None
+
+    async def test_switch_card_button_also_enforces_ownership(
+        self, manager: BridgeManager, bridge: MockBridge, session_mgr: SessionManager
+    ):
+        # switch_session() is the shared path for both /switch text and the
+        # Feishu card button — exercise it directly like the card handler does.
+        await manager.handle_incoming("mock", "c1", "hello", bridge)
+        await _drain(session_mgr, bridge)
+        owned_by_c1 = manager.get_session_id("mock", "c1")
+
+        msg = await manager.switch_session("mock", "c2", owned_by_c1)
+        assert "not found" in msg
+        assert manager.get_session_id("mock", "c2") is None
+
+
+class TestStartAllPropagatesFailure:
+    async def test_bridge_start_failure_propagates(self, session_mgr: SessionManager):
+        # Snape should-fix: this app registers exactly one bridge, so a
+        # swallowed start() failure would leave the process looking healthy
+        # while the bot is actually not connected to anything.
+        manager = BridgeManager(session_mgr)
+
+        class FailingBridge(MockBridge):
+            async def start(self) -> None:
+                raise RuntimeError("ws connect failed")
+
+        manager.register_bridge(FailingBridge(manager))
+        with pytest.raises(RuntimeError, match="ws connect failed"):
+            await manager.start_all()
+
     async def test_unknown_command(self, manager: BridgeManager, bridge: MockBridge):
         await manager.handle_incoming("mock", "c1", "/bogus", bridge)
         assert "Unknown command" in bridge.sent[-1][2]["text"]

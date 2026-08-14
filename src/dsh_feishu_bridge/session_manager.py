@@ -34,6 +34,7 @@ class SessionStatus(Enum):
 class BridgeSession:
     id: str
     name: str
+    owner: str | None = None  # "platform:chat_id" of the chat that created it
     created_at: float = field(default_factory=time.time)
     status: SessionStatus = SessionStatus.IDLE
     message_count: int = 0
@@ -55,12 +56,20 @@ class SessionManager:
         self._sessions: dict[str, BridgeSession] = {}
         self._listeners: dict[str, BroadcastHandler] = {}
         self._tasks: set[asyncio.Task] = set()
+        # One lock per dsh session id, so two fast successive messages to the
+        # same session serialize instead of both calling backend.run_turn()
+        # concurrently — the SDK's Session.run() only filters notifications
+        # by session id, so two overlapping calls on the same id would race
+        # to collect each other's events (see docs/architecture.md).
+        self._session_locks: dict[str, asyncio.Lock] = {}
 
     # --- session CRUD ---
 
-    async def create_session(self, name: str | None = None) -> BridgeSession:
+    async def create_session(
+        self, name: str | None = None, *, owner: str | None = None
+    ) -> BridgeSession:
         session_id = f"feishu-{uuid.uuid4().hex}"
-        session = BridgeSession(id=session_id, name=name or session_id)
+        session = BridgeSession(id=session_id, name=name or session_id, owner=owner)
         self._sessions[session_id] = session
         return session
 
@@ -71,6 +80,13 @@ class SessionManager:
 
     def list_sessions(self) -> list[BridgeSession]:
         return list(self._sessions.values())
+
+    def _lock_for(self, session_id: str) -> asyncio.Lock:
+        lock = self._session_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_id] = lock
+        return lock
 
     # --- broadcast ---
 
@@ -99,40 +115,61 @@ class SessionManager:
         task.add_done_callback(self._tasks.discard)
 
     async def _run_turn(self, session: BridgeSession, text: str) -> None:
-        session.status = SessionStatus.RUNNING
-        session.message_count += 1
-        await self._broadcast(session.id, {"type": "status", "status": "running"})
-        try:
-            result = await self._backend.run_turn(session.id, text)
-        except DshAdapterError as exc:
-            session.status = SessionStatus.ERROR
-            await self._broadcast(session.id, {"type": "error", "message": str(exc)})
+        # Serialize turns for THIS session; a different session's lock is
+        # independent, so concurrent chats still run concurrently.
+        async with self._lock_for(session.id):
+            session.status = SessionStatus.RUNNING
+            session.message_count += 1
+            await self._broadcast(session.id, {"type": "status", "status": "running"})
+            try:
+                result = await self._backend.run_turn(session.id, text)
+            except Exception as exc:
+                # Broad on purpose (not just DshAdapterError): the SDK's
+                # low-level client can also raise a bare TimeoutError, and any
+                # other unexpected exception must still resolve the chat back
+                # to idle rather than leaving it stuck at "running" forever.
+                # CancelledError (shutdown()) is a BaseException, not an
+                # Exception, so it still propagates through this handler.
+                logger.exception("dsh turn failed for session %s", session.id)
+                session.status = SessionStatus.ERROR
+                message = str(exc) if isinstance(exc, DshAdapterError) else f"Internal error: {exc}"
+                await self._broadcast(session.id, {"type": "error", "message": message})
+                await self._broadcast(
+                    session.id, {"type": "result", "cost": None, "is_error": True}
+                )
+                await self._broadcast(session.id, {"type": "status", "status": "idle"})
+                return
+
+            is_error = result.finish_reason not in (None, "completed")
+            if result.text:
+                await self._broadcast(
+                    session.id, {"type": "assistant_text", "content": result.text}
+                )
+            if is_error and not result.text:
+                await self._broadcast(
+                    session.id,
+                    {
+                        "type": "error",
+                        "message": f"Turn ended without a reply (reason: {result.finish_reason}).",
+                    },
+                )
+            session.status = SessionStatus.ERROR if is_error else SessionStatus.IDLE
             await self._broadcast(
-                session.id, {"type": "result", "cost": None, "is_error": True}
+                session.id, {"type": "result", "cost": None, "is_error": is_error}
             )
             await self._broadcast(session.id, {"type": "status", "status": "idle"})
-            return
-
-        is_error = result.finish_reason not in (None, "completed")
-        if result.text:
-            await self._broadcast(
-                session.id, {"type": "assistant_text", "content": result.text}
-            )
-        if is_error and not result.text:
-            await self._broadcast(
-                session.id,
-                {
-                    "type": "error",
-                    "message": f"Turn ended without a reply (reason: {result.finish_reason}).",
-                },
-            )
-        session.status = SessionStatus.ERROR if is_error else SessionStatus.IDLE
-        await self._broadcast(
-            session.id, {"type": "result", "cost": None, "is_error": is_error}
-        )
-        await self._broadcast(session.id, {"type": "status", "status": "idle"})
 
     async def shutdown(self) -> None:
-        for task in list(self._tasks):
+        tasks = list(self._tasks)
+        for task in tasks:
             task.cancel()
+        if tasks:
+            # Best-effort: this awaits the asyncio-level cancellation, but a
+            # turn blocked inside asyncio.to_thread (the SDK's synchronous
+            # call) keeps running in its worker thread regardless — cancelling
+            # the awaiting task doesn't stop that thread. Waiting here still
+            # matters: it sequences shutdown so backend.close() never races a
+            # turn that's still between "cancelled" and "thread actually
+            # returned", instead of firing both at once.
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self._backend.close()

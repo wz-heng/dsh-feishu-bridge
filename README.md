@@ -99,6 +99,7 @@ Everything is an environment variable. An optional YAML file (path via `DSH_FEIS
 - **Fail-closed by default.** No configured `FEISHU_ALLOWED_OPEN_IDS` means every sender is rejected — there is no implicit allow-all. This is deliberate: an agent bridge with a blank allowlist would otherwise let anyone in your tenant run arbitrary agent turns.
 - **Webhook mode requires a verification token.** Without one, the webhook route is never registered — the process refuses to boot half-configured rather than silently accepting unverified events.
 - **Card buttons (session-switch) use one-time, identity-bound nonces.** A nonce is minted for one exact action + session; a second click, a replayed nonce, or a tampered card value is rejected without being honored.
+- **Sessions are owned by the chat that created them.** `/sessions` only lists (and `/switch` only accepts) sessions owned by the requesting chat — even between two allowlisted chats, one can't list or hijack another's session id and start receiving its replies.
 - Run this bridge's process with the least privilege the composition needs. The bundled default `dsh` composition (`examples/jsonrpc-agent` upstream) uses `danger-full-access` bash + file editing — run it in a disposable workspace/container, not against a machine you care about.
 
 ## Limitations (v1, by design)

@@ -7,6 +7,7 @@ import sys
 import uvicorn
 
 from .app import build_app
+from .bridges.feishu import FeishuConfigError
 from .config import ConfigError, load_settings
 
 
@@ -28,7 +29,7 @@ def main() -> None:
     try:
         settings = load_settings(args.config)
         app = build_app(settings)
-    except (ConfigError, RuntimeError) as exc:
+    except (ConfigError, FeishuConfigError, RuntimeError) as exc:
         print(f"dsh-feishu-bridge: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
 

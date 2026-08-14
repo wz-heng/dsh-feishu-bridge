@@ -62,12 +62,15 @@ class BridgeManager:
         self._bridges[bridge.name] = bridge
 
     async def start_all(self) -> None:
+        """Start every registered bridge. A failure here is a boot failure,
+        not a background warning: this app registers exactly one bridge
+        (Feishu), so swallowing its start error would leave the FastAPI
+        lifespan reporting a healthy, fully-started process while the bot is
+        actually not connected to anything — silent degradation, not
+        graceful degradation. Let it propagate so uvicorn fails to boot."""
         for name, bridge in self._bridges.items():
-            try:
-                await bridge.start()
-                logger.info("Bridge '%s' started", name)
-            except Exception:
-                logger.exception("Failed to start bridge '%s'", name)
+            await bridge.start()
+            logger.info("Bridge '%s' started", name)
 
     async def stop_all(self) -> None:
         for name, bridge in self._bridges.items():
@@ -124,8 +127,10 @@ class BridgeManager:
         session = self.session_mgr.get_session(session_id) if session_id else None
         if session is None:
             # No sticky thread (first contact, or it was garbage-collected) —
-            # open a fresh one and make it sticky.
-            session = await self.session_mgr.create_session()
+            # open a fresh one, owned by this chat, and make it sticky.
+            session = await self.session_mgr.create_session(
+                owner=self._mapping_key(platform, chat_id)
+            )
             self.set_sticky_session(platform, chat_id, session.id)
             session_id = session.id
 
@@ -190,12 +195,20 @@ class BridgeManager:
     async def switch_session(
         self, platform: str, chat_id: str, session_id: str
     ) -> str:
-        """Repoint the chat's sticky session to an existing session. Returns
-        a user-facing status line (shared by the `/switch` command and the
-        `/sessions` inline-button callback)."""
+        """Repoint the chat's sticky session to an existing session OWNED BY
+        THIS CHAT. Returns a user-facing status line (shared by the
+        `/switch` command and the `/sessions` inline-button callback).
+
+        Ownership is enforced here, not just in what `/sessions` chooses to
+        list: without it, any allowlisted chat could `/switch` straight to
+        another chat's session id (guessed or leaked) and both chats would
+        then receive that session's broadcasts — a cross-chat context leak.
+        """
         session = self.session_mgr.get_session(session_id)
         if session is None:
             return f"Session '{session_id}' not found."
+        if session.owner is not None and session.owner != self._mapping_key(platform, chat_id):
+            return f"Session '{session_id}' not found."  # don't confirm existence of another chat's session
         self.set_sticky_session(platform, chat_id, session.id)
         return f"Switched to session '{session.name}' ({session.id})."
 
@@ -209,7 +222,9 @@ class BridgeManager:
         args = parts[1] if len(parts) > 1 else ""
 
         if command == "/new":
-            session = await self.session_mgr.create_session(name=args or None)
+            session = await self.session_mgr.create_session(
+                name=args or None, owner=self._mapping_key(platform, chat_id)
+            )
             self.set_sticky_session(platform, chat_id, session.id)
             await bridge.send_text(
                 chat_id,
@@ -218,8 +233,12 @@ class BridgeManager:
             )
 
         elif command == "/sessions":
+            # Scoped to sessions THIS chat created — listing every session
+            # process-wide would leak other chats' session ids (and, via
+            # /switch, their conversations) to anyone on the allowlist.
+            own_key = self._mapping_key(platform, chat_id)
             sessions = sorted(
-                self.session_mgr.list_sessions(),
+                (s for s in self.session_mgr.list_sessions() if s.owner == own_key),
                 key=lambda s: s.created_at,
                 reverse=True,
             )
