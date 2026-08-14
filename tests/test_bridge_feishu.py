@@ -20,7 +20,9 @@ lifecycle.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -54,7 +56,7 @@ def _settings(**over):
         feishu_app_secret="sec",
         feishu_transport="webhook",
         feishu_verification_token="vtok",
-        feishu_encrypt_key=None,
+        feishu_encrypt_key="ekey",
         feishu_domain="http://127.0.0.1:9",
         feishu_allowed_open_ids=["ou_me"],
         feishu_allowed_chat_ids=[],
@@ -134,6 +136,18 @@ class TestBuildMatrix:
         with pytest.raises(FeishuConfigError):
             build_feishu_bridge(object(), _settings(feishu_verification_token=None))
 
+    def test_webhook_without_encrypt_key_is_boot_failure(self):
+        with pytest.raises(FeishuConfigError):
+            build_feishu_bridge(object(), _settings(feishu_encrypt_key=None))
+        with pytest.raises(FeishuConfigError):
+            build_feishu_bridge(object(), _settings(feishu_encrypt_key=""))
+
+    def test_ws_transport_without_encrypt_key_is_allowed(self):
+        b = build_feishu_bridge(
+            object(), _settings(feishu_transport="ws", feishu_verification_token=None, feishu_encrypt_key=None)
+        )
+        assert b is not None and b.transport == "ws"
+
     def test_ws_transport_without_token_is_allowed(self):
         b = build_feishu_bridge(
             object(), _settings(feishu_transport="ws", feishu_verification_token=None)
@@ -159,6 +173,222 @@ class TestBuildMatrix:
     def test_loopback_flag_set(self):
         assert _make_bridge(feishu_domain="http://127.0.0.1:9")._loopback is True
         assert _make_bridge(feishu_domain="https://open.feishu.cn")._loopback is False
+
+
+# --------------------------------------------------------------------------
+# Webhook boundary: signature / timestamp / replay verification enforced
+# HERE, at the bridge's own boundary, never delegated to the SDK. Snape's
+# blocker: an invalid signature + an expired timestamp still returned
+# success and reached `manager.handle_incoming` — every test below asserts
+# both the response status AND that `_channel.handle_webhook_request` (the
+# only path to `handle_incoming`) was never awaited on a rejected request.
+# --------------------------------------------------------------------------
+
+
+def _webhook_sign(body: bytes, *, timestamp: str, nonce: str, encrypt_key: str) -> str:
+    return hashlib.sha256(
+        (timestamp + nonce + encrypt_key).encode("utf-8") + body
+    ).hexdigest()
+
+
+def _webhook_headers(
+    body: bytes,
+    *,
+    timestamp: str,
+    nonce: str,
+    encrypt_key: str = "ekey",
+    signature: str | None = None,
+) -> dict[str, str]:
+    sig = (
+        signature
+        if signature is not None
+        else _webhook_sign(body, timestamp=timestamp, nonce=nonce, encrypt_key=encrypt_key)
+    )
+    return {
+        "X-Lark-Request-Timestamp": timestamp,
+        "X-Lark-Request-Nonce": nonce,
+        "X-Lark-Signature": sig,
+    }
+
+
+class TestWebhookVerification:
+    BODY = b'{"schema":"2.0","header":{"event_type":"im.message.receive_v1","token":"vtok"}}'
+
+    def _bridge(self) -> FeishuBridge:
+        b = _make_bridge()
+        # The SDK dispatch itself (decrypt/challenge/routing) is exercised
+        # elsewhere in the SDK's own test suite; here we're proving our OWN
+        # gate never lets a bad request reach it.
+        b._channel.handle_webhook_request = AsyncMock(return_value=(200, b'{"msg":"success"}'))
+        return b
+
+    async def test_missing_signature_headers_rejected(self):
+        b = self._bridge()
+        status, _ = await b.handle_webhook({}, self.BODY)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_invalid_signature_rejected(self):
+        b = self._bridge()
+        now = str(int(time.time()))
+        headers = _webhook_headers(self.BODY, timestamp=now, nonce="n1", signature="deadbeef")
+        status, _ = await b.handle_webhook(headers, self.BODY)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_wrong_encrypt_key_signature_rejected(self):
+        b = self._bridge()
+        now = str(int(time.time()))
+        headers = _webhook_headers(self.BODY, timestamp=now, nonce="n1", encrypt_key="wrong-key")
+        status, _ = await b.handle_webhook(headers, self.BODY)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_expired_timestamp_rejected_even_with_valid_signature(self):
+        b = self._bridge()
+        old = str(int(time.time()) - 3600)  # 1h old, outside the 5-min window
+        headers = _webhook_headers(self.BODY, timestamp=old, nonce="n1")
+        status, _ = await b.handle_webhook(headers, self.BODY)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_future_timestamp_rejected(self):
+        b = self._bridge()
+        future = str(int(time.time()) + 3600)
+        headers = _webhook_headers(self.BODY, timestamp=future, nonce="n1")
+        status, _ = await b.handle_webhook(headers, self.BODY)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_invalid_signature_and_expired_timestamp_rejected(self):
+        """Snape's exact repro path: invalid signature + a stale timestamp
+        must be rejected, and `handle_incoming` must never fire."""
+        b = self._bridge()
+        old = str(int(time.time()) - 3600)
+        headers = _webhook_headers(
+            self.BODY, timestamp=old, nonce="n1", signature="not-a-real-signature"
+        )
+        status, _ = await b.handle_webhook(headers, self.BODY)
+        assert status != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+        b.manager.handle_incoming.assert_not_awaited()
+
+    async def test_replayed_timestamp_and_nonce_rejected(self):
+        b = self._bridge()
+        now = str(int(time.time()))
+        headers = _webhook_headers(self.BODY, timestamp=now, nonce="n1")
+        status1, _ = await b.handle_webhook(headers, self.BODY)
+        assert status1 == 200
+        status2, _ = await b.handle_webhook(headers, self.BODY)
+        assert status2 != 200
+        assert b._channel.handle_webhook_request.await_count == 1
+
+    async def test_same_timestamp_different_nonce_is_not_a_replay(self):
+        b = self._bridge()
+        now = str(int(time.time()))
+        h1 = _webhook_headers(self.BODY, timestamp=now, nonce="n1")
+        h2 = _webhook_headers(self.BODY, timestamp=now, nonce="n2")
+        s1, _ = await b.handle_webhook(h1, self.BODY)
+        s2, _ = await b.handle_webhook(h2, self.BODY)
+        assert s1 == 200 and s2 == 200
+        assert b._channel.handle_webhook_request.await_count == 2
+
+    async def test_valid_request_passes_through_to_sdk(self):
+        b = self._bridge()
+        now = str(int(time.time()))
+        headers = _webhook_headers(self.BODY, timestamp=now, nonce="n1")
+        status, content = await b.handle_webhook(headers, self.BODY)
+        assert status == 200
+        assert content == b'{"msg":"success"}'
+        b._channel.handle_webhook_request.assert_awaited_once_with(headers, self.BODY)
+
+    async def test_header_lookup_is_case_insensitive(self):
+        b = self._bridge()
+        now = str(int(time.time()))
+        headers = _webhook_headers(self.BODY, timestamp=now, nonce="n1")
+        lowered = {k.lower(): v for k, v in headers.items()}
+        status, _ = await b.handle_webhook(lowered, self.BODY)
+        assert status == 200
+
+    async def test_replay_rejected_even_at_future_skew_and_ttl_edge(self, monkeypatch):
+        """Snape's should-finding: a receipt-time-only nonce-cache TTL leaves
+        a gap. A request signed up to WEBHOOK_TIMESTAMP_WINDOW_SECONDS in the
+        future still passes the timestamp check for up to 2x the window
+        after receipt — so the nonce must be remembered for that long, not
+        just one window, or a replay lands right in the gap."""
+        b = self._bridge()
+        base_wall = time.time()
+        base_mono = time.monotonic()
+        offset = {"s": 0.0}
+
+        monkeypatch.setattr(time, "time", lambda: base_wall + offset["s"])
+        monkeypatch.setattr(time, "monotonic", lambda: base_mono + offset["s"])
+
+        future_ts = str(int(base_wall) + 299)  # just inside the +window edge
+        headers = _webhook_headers(self.BODY, timestamp=future_ts, nonce="future-edge")
+
+        status1, _ = await b.handle_webhook(headers, self.BODY)
+        assert status1 == 200
+
+        # A flat one-window receipt-time TTL would have evicted the nonce by
+        # now, yet the SIGNED timestamp (fixed at future_ts) is still only
+        # ~2s outside "now" — comfortably inside the timestamp check's own
+        # window — so a correct implementation must still reject the replay.
+        offset["s"] += 301
+
+        status2, _ = await b.handle_webhook(headers, self.BODY)
+        assert status2 != 200
+        assert b._channel.handle_webhook_request.await_count == 1
+
+    async def test_nonce_forgotten_once_signed_timestamp_truly_expires(self):
+        """The flip side of the TTL fix: once `ts` itself falls outside the
+        window, a replay is rejected by the timestamp check regardless, so
+        the nonce-cache entry is free to be forgotten — it must not linger
+        forever and leak memory."""
+        b = self._bridge()
+        old = str(int(time.time()) - 3600)
+        headers = _webhook_headers(self.BODY, timestamp=old, nonce="n1", signature="irrelevant")
+        # This request never reaches the nonce check (it fails signature,
+        # and would also fail the timestamp check) — confirms a rejected
+        # request never occupies a replay-cache slot in the first place.
+        status, _ = await b.handle_webhook(headers, self.BODY)
+        assert status != 200
+        assert len(b._webhook_nonces) == 0
+
+    async def test_timestamp_exactly_at_window_boundary_rejected(self, monkeypatch):
+        """Snape's second should-finding: a diff of EXACTLY
+        WEBHOOK_TIMESTAMP_WINDOW_SECONDS used to be accepted, which gave the
+        nonce-cache entry a TTL of exactly 0 — evicted as "expired" the
+        instant the very next check ran, so an immediate replay of the same
+        boundary request sailed straight through untouched."""
+        b = self._bridge()
+        wall = 1_000_000.0
+        monkeypatch.setattr(time, "time", lambda: wall)
+        monkeypatch.setattr(time, "monotonic", lambda: 0.0)
+
+        ts = str(int(wall) - 300)  # diff == 300 exactly
+        headers = _webhook_headers(self.BODY, timestamp=ts, nonce="edge")
+
+        status1, _ = await b.handle_webhook(headers, self.BODY)
+        assert status1 != 200
+        status2, _ = await b.handle_webhook(headers, self.BODY)
+        assert status2 != 200
+        b._channel.handle_webhook_request.assert_not_awaited()
+
+    async def test_timestamp_just_inside_window_accepted_and_replay_rejected(self, monkeypatch):
+        b = self._bridge()
+        wall = 1_000_000.0
+        monkeypatch.setattr(time, "time", lambda: wall)
+        monkeypatch.setattr(time, "monotonic", lambda: 0.0)
+
+        ts = str(int(wall) - 299)  # diff == 299, just inside the window
+        headers = _webhook_headers(self.BODY, timestamp=ts, nonce="edge2")
+
+        status1, _ = await b.handle_webhook(headers, self.BODY)
+        assert status1 == 200
+        status2, _ = await b.handle_webhook(headers, self.BODY)
+        assert status2 != 200
+        assert b._channel.handle_webhook_request.await_count == 1
 
 
 # --------------------------------------------------------------------------

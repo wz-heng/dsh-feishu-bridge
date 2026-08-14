@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
 import queue
@@ -36,6 +38,22 @@ MAX_PREVIEW_CHARS = 3000
 # only ever drops a nonce for a card old enough that a late click is already
 # stale — the one-time-use guarantee for *recent* cards is untouched.
 MAX_LIVE_NONCES = 2000
+
+# Feishu webhook signature headers (event subscription v2, encrypt-key mode):
+# X-Lark-Signature = sha256(timestamp + nonce + encrypt_key + raw_body).
+_WEBHOOK_TIMESTAMP_HEADER = "x-lark-request-timestamp"
+_WEBHOOK_NONCE_HEADER = "x-lark-request-nonce"
+_WEBHOOK_SIGNATURE_HEADER = "x-lark-signature"
+
+# How far a request's timestamp may drift from wall-clock "now" and still be
+# accepted. Matches the source bridge's own webhook convention.
+WEBHOOK_TIMESTAMP_WINDOW_SECONDS = 300
+
+# Cap on tracked (timestamp, nonce) replay keys, mirroring MAX_LIVE_NONCES'
+# FIFO-eviction posture: normal traffic never gets near this (entries older
+# than the window are pruned on every request), it only bounds a burst of
+# otherwise-validly-signed requests within one window.
+MAX_WEBHOOK_NONCES = 10_000
 
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 
@@ -120,7 +138,13 @@ def build_feishu_bridge(
     Fail-loud, not fail-silent:
     - exactly one of app_id / app_secret set → FeishuConfigError (boot fails);
     - webhook transport without a verification token → FeishuConfigError, so a
-      webhook route is never registered bare (fail-closed).
+      webhook route is never registered bare (fail-closed);
+    - webhook transport without an encrypt key → FeishuConfigError. A
+      verification token alone cannot authenticate the request's origin (it
+      is a static value carried in the body, not a per-request signature);
+      the encrypt key is what `FeishuBridge.handle_webhook` uses to verify
+      `X-Lark-Signature` itself, at this bridge's own boundary, before a
+      request is trusted (fail-closed).
     """
     app_id = settings.feishu_app_id
     app_secret = settings.feishu_app_secret
@@ -141,6 +165,11 @@ def build_feishu_bridge(
         raise FeishuConfigError(
             "Feishu webhook transport requires feishu_verification_token — "
             "without it the webhook route is not registered (fail-closed)."
+        )
+    if transport == "webhook" and not settings.feishu_encrypt_key:
+        raise FeishuConfigError(
+            "Feishu webhook transport requires feishu_encrypt_key — without "
+            "it inbound requests cannot be signature-verified (fail-closed)."
         )
 
     return FeishuBridge(
@@ -188,6 +217,9 @@ class FeishuBridge(Bridge):
         self.transport = transport
         self._app_id = app_id
         self._app_secret = app_secret
+        # Our OWN copy, used by _verify_webhook_request — never delegated to
+        # the SDK (see handle_webhook / build_feishu_bridge).
+        self._encrypt_key = encrypt_key
         self._domain = domain.rstrip("/")
         # Fail-closed allowlists: an empty/None open_id set means the
         # `_authorized` gate rejects EVERY sender and operator — there is no
@@ -219,6 +251,13 @@ class FeishuBridge(Bridge):
         # nonce -> {"kind", ...identity fields} for one-time card consumption.
         # Insertion-ordered dict; FIFO-evicted at cap.
         self._nonces: dict[str, dict[str, str]] = {}
+
+        # "timestamp:nonce" -> monotonic expiry (when the SIGNED timestamp
+        # itself ages out of the validity window — see
+        # _consume_webhook_nonce), for webhook replay rejection. Pruned of
+        # expired entries on every request, FIFO-evicted at cap as a
+        # defensive floor.
+        self._webhook_nonces: dict[str, float] = {}
 
         # The app's main event loop, captured in start(). The SDK delivers
         # inbound events on its OWN loop in ws mode (a background thread), but
@@ -539,10 +578,104 @@ class FeishuBridge(Bridge):
         self, headers: dict[str, str], body: bytes
     ) -> tuple[int, bytes]:
         """Framework-agnostic webhook entry — the mounted FastAPI route hands
-        raw headers+body here. The SDK dispatcher does decrypt / verification
-        token / signature / challenge, then routes to our registered handlers.
+        raw headers+body here.
+
+        Signature / timestamp / replay verification happens HERE, at this
+        bridge's OWN boundary, before anything is handed to the SDK. We do
+        not rely on ``lark_channel`` for this: its signature check silently
+        no-ops when ``encrypt_key`` is unset (impossible here — see
+        ``build_feishu_bridge``, which now requires it for webhook
+        transport), and even when the key is set, the SDK never checks
+        timestamp freshness or nonce reuse at all — a captured valid request
+        replays cleanly forever. A request that fails any of these checks is
+        rejected before it ever reaches ``_channel.handle_webhook_request``
+        (and therefore before it can reach ``manager.handle_incoming``).
+
+        Only a request that PASSES is handed to the SDK dispatcher, which
+        then does its own decrypt / verification-token / challenge / routing
+        to our registered handlers — that part is unaffected.
         """
+        ok, reason = self._verify_webhook_request(headers, body)
+        if not ok:
+            logger.warning("Feishu: webhook request rejected (%s)", reason)
+            return 401, b'{"code":401,"msg":"unauthorized"}'
         return await self._channel.handle_webhook_request(headers, body)
+
+    def _verify_webhook_request(
+        self, headers: dict[str, str], body: bytes
+    ) -> tuple[bool, str]:
+        """Fail-closed signature + timestamp + replay check.
+
+        Returns ``(True, "")`` on success or ``(False, reason)`` on the first
+        check that fails — headers missing, signature mismatch, timestamp
+        outside the window, or a (timestamp, nonce) pair already seen.
+        """
+        lowered = {k.lower(): v for k, v in headers.items()}
+        timestamp = lowered.get(_WEBHOOK_TIMESTAMP_HEADER)
+        nonce = lowered.get(_WEBHOOK_NONCE_HEADER)
+        signature = lowered.get(_WEBHOOK_SIGNATURE_HEADER)
+        if not timestamp or not nonce or not signature:
+            return False, "signature headers missing"
+
+        expected = hashlib.sha256(
+            (timestamp + nonce + self._encrypt_key).encode("utf-8") + body
+        ).hexdigest()
+        if not hmac.compare_digest(expected, signature):
+            return False, "signature invalid"
+
+        try:
+            ts = int(timestamp)
+        except ValueError:
+            return False, "timestamp malformed"
+        now_wall = time.time()
+        # Strictly `<` (not `<=`), not just for the window's own sake: a
+        # diff exactly at WEBHOOK_TIMESTAMP_WINDOW_SECONDS would give the
+        # nonce-cache entry below a TTL of exactly 0 — evicted as "expired"
+        # the instant the very next request is checked, defeating replay
+        # rejection for a request sitting right on the boundary. Rejecting
+        # the boundary itself guarantees every accepted request's cache
+        # entry gets strictly positive headroom.
+        if abs(now_wall - ts) >= WEBHOOK_TIMESTAMP_WINDOW_SECONDS:
+            return False, "timestamp outside window"
+
+        # Only a request that already passed signature + timestamp consumes a
+        # replay-cache slot — an attacker without the encrypt key can't burn
+        # through it with forged (timestamp, nonce) pairs.
+        if not self._consume_webhook_nonce(f"{timestamp}:{nonce}", ts, now_wall):
+            return False, "nonce replay"
+
+        return True, ""
+
+    def _consume_webhook_nonce(self, key: str, ts: int, now_wall: float) -> bool:
+        """True (and records it) the first time `key` is seen while its
+        SIGNED timestamp is still inside the validity window; False on a
+        repeat — the replay-rejection gate.
+
+        The cache entry's TTL tracks how much longer `ts` itself stays valid
+        (``ts + WEBHOOK_TIMESTAMP_WINDOW_SECONDS - now``), NOT a flat window
+        from receipt time. A flat receipt-time TTL and the timestamp check's
+        own ±window overlap asymmetrically: a request signed up to
+        ``WEBHOOK_TIMESTAMP_WINDOW_SECONDS`` in the future keeps passing the
+        timestamp check for up to ``2 * WEBHOOK_TIMESTAMP_WINDOW_SECONDS``
+        after receipt, so a receipt-time TTL of just one window would forget
+        the nonce while the timestamp check would still accept a replay.
+        Tying the TTL to the signed timestamp's own expiry closes that gap:
+        the nonce is remembered for exactly as long as a replay could still
+        pass the timestamp check, never more, never less.
+        """
+        now_mono = time.monotonic()
+        expired = [k for k, expiry in self._webhook_nonces.items() if expiry <= now_mono]
+        for k in expired:
+            self._webhook_nonces.pop(k, None)
+
+        if key in self._webhook_nonces:
+            return False
+        ttl = max(0.0, (ts + WEBHOOK_TIMESTAMP_WINDOW_SECONDS) - now_wall)
+        if len(self._webhook_nonces) >= MAX_WEBHOOK_NONCES:
+            oldest = next(iter(self._webhook_nonces))
+            self._webhook_nonces.pop(oldest, None)
+        self._webhook_nonces[key] = now_mono + ttl
+        return True
 
     # --- authorization -------------------------------------------------------
 

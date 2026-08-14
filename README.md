@@ -31,7 +31,7 @@ export FEISHU_APP_ID=cli_xxxxxxxx
 export FEISHU_APP_SECRET=xxxxxxxx
 export FEISHU_TRANSPORT=ws          # or "webhook" if you have a public URL
 # export FEISHU_VERIFICATION_TOKEN=xxxx   # required when FEISHU_TRANSPORT=webhook
-# export FEISHU_ENCRYPT_KEY=xxxx          # optional, if you enabled encryption
+# export FEISHU_ENCRYPT_KEY=xxxx          # required when FEISHU_TRANSPORT=webhook
 
 # Fail-closed allowlist — REQUIRED. With no ids configured the bot answers
 # no one; every message is rejected by design (see "Security posture" below).
@@ -87,7 +87,7 @@ Everything is an environment variable. An optional YAML file (path via `DSH_FEIS
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | — | Both required together, or leave both unset. |
 | `FEISHU_TRANSPORT` | `ws` | `ws` (no public URL needed) or `webhook`. |
 | `FEISHU_VERIFICATION_TOKEN` | — | Required when `FEISHU_TRANSPORT=webhook`. |
-| `FEISHU_ENCRYPT_KEY` | unset | Optional, if you enabled event encryption. |
+| `FEISHU_ENCRYPT_KEY` | unset | Required when `FEISHU_TRANSPORT=webhook` — enable "Encrypt Key" for this event subscription in the Feishu console and paste the same value here. Used to verify each request's `X-Lark-Signature` (see "Security posture"). |
 | `FEISHU_DOMAIN` | `https://open.feishu.cn` | Change for Lark international / a proxy. |
 | `FEISHU_ALLOWED_OPEN_IDS` | *(empty)* | Comma-separated. **Required** — empty means nobody is authorized. |
 | `FEISHU_ALLOWED_CHAT_IDS` | *(empty = no restriction)* | Comma-separated group allowlist. |
@@ -97,7 +97,8 @@ Everything is an environment variable. An optional YAML file (path via `DSH_FEIS
 ## Security posture
 
 - **Fail-closed by default.** No configured `FEISHU_ALLOWED_OPEN_IDS` means every sender is rejected — there is no implicit allow-all. This is deliberate: an agent bridge with a blank allowlist would otherwise let anyone in your tenant run arbitrary agent turns.
-- **Webhook mode requires a verification token.** Without one, the webhook route is never registered — the process refuses to boot half-configured rather than silently accepting unverified events.
+- **Webhook mode requires both a verification token and an encrypt key.** Without either, the webhook route is never registered — the process refuses to boot half-configured rather than silently accepting unverified events. The encrypt key is not optional: a verification token alone is a static value carried in the request body, not a per-request signature, so it cannot authenticate where a request actually came from.
+- **Every webhook request is signature-, timestamp-, and replay-verified at this bridge's own boundary** — before it is ever handed to the underlying SDK. `X-Lark-Signature` is checked against `sha256(timestamp + nonce + encrypt_key + body)`; the timestamp must fall within a 5-minute window of "now"; and a `(timestamp, nonce)` pair already seen is rejected as a replay. A request that fails any of these checks gets a `401` and never reaches message handling.
 - **Card buttons (session-switch) use one-time, identity-bound nonces.** A nonce is minted for one exact action + session; a second click, a replayed nonce, or a tampered card value is rejected without being honored.
 - **Sessions are owned by the chat that created them.** `/sessions` only lists (and `/switch` only accepts) sessions owned by the requesting chat — even between two allowlisted chats, one can't list or hijack another's session id and start receiving its replies.
 - Run this bridge's process with the least privilege the composition needs. The bundled default `dsh` composition (`examples/jsonrpc-agent` upstream) uses `danger-full-access` bash + file editing — run it in a disposable workspace/container, not against a machine you care about.

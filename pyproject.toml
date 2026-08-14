@@ -23,8 +23,9 @@ classifiers = [
 
 # Both third-party dependencies are pinned to an EXACT version on purpose:
 # deepseek-harness-sdk is a v0.1 developer preview that documents breaking
-# changes between releases, and lark-channel-sdk is the same exact pin Owlery
-# runs in production. Bumping either is a deliberate, tested decision — never
+# changes between releases, and lark-channel-sdk is the same exact pin the
+# upstream bridge runs in production. Bumping either is a deliberate, tested
+# decision — never
 # a side effect of a routine `pip install -U`.
 dependencies = [
   "deepseek-harness-sdk==0.1.0rc6",

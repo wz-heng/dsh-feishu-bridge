@@ -1,6 +1,6 @@
 """Sticky-session bookkeeping and turn orchestration on top of a DshBackend.
 
-This plays the role Owlery's ``SessionManager`` plays for its bridges, but
+This plays the role the upstream bridge's ``SessionManager`` plays there, but
 scoped to what one dsh backend actually offers (see dsh_adapter.py module
 docstring): no multi-agent registry, no mid-turn incremental streaming, no
 tool-approval flow. One session == one dsh conversation, addressed by the

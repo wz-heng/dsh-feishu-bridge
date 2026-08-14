@@ -3,8 +3,8 @@ DEEPSEEK_API_KEY quota and spawns the real dsh runtime subprocess. Everything
 else in tests/ uses FakeDshBackend / FakeFeishuServer specifically so this is
 the exception, not the norm.
 
-Auto-skips when DEEPSEEK_API_KEY isn't set, mirroring the convention Owlery's
-own test_*_real.py suite uses for its real-CLI smoke tests.
+Auto-skips when DEEPSEEK_API_KEY isn't set, mirroring the real-CLI smoke-test
+convention of the upstream bridge project this was ported from.
 """
 
 from __future__ import annotations
