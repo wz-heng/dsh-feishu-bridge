@@ -74,7 +74,7 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
    pip install -e .
    ```
 
-   配置 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_ALLOWED_OPEN_IDS` 等——可以 export 到启动 `dsh` 的 shell 里，也可以写进本仓库根目录的 `.env` 文件（每行 `KEY=value`；插件会直接读取它并合并进被拉起进程的环境变量，因为 Python 侧本身只读 `process.env`）。
+   配置 `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_ALLOWED_OPEN_IDS` 等——可以 export 到启动 `dsh` 的 shell 里，也可以写进本仓库根目录的 `.env` 文件（每行 `KEY=value`；插件会直接读取它并合并进被拉起进程继承的环境变量，因为 Python 侧本身只读 `os.environ`）。
 
 2. **再把插件加进 profile：**
 
@@ -84,7 +84,7 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 
    之后该 profile 每次启动，`dsh` 都会把这个桥当作受管子进程拉起：它会执行 `<repo>/.venv/bin/python -m dsh_feishu_bridge`（仓库根目录没有 `.venv` 时回退到 `PATH` 上的 `python3`），等待 `GET /health` 返回 `{"status": "ok"}`，并在 profile/插件 dispose 时发送 `SIGTERM`，若 5 秒内未退出则升级为 `SIGKILL`——和手动 `Ctrl-C` 独立进程时的干净退出行为一致，只是自动化了。
 
-   每个 config 字段都是可选的（`host`、`port`、`pythonBin`、`startupTimeoutMs`、`env`）——只要第一步做好了，且默认值（`0.0.0.0:8788`、仓库根 `.venv`）符合你的环境，裸 `add` 就能直接工作。如需覆盖，在你自己 profile 的 `cordis.patch.yml` 里改同一个 id，例如换解释器：
+   每个 config 字段都是可选的（`host`、`port`、`pythonBin`、`startupTimeoutMs`、`env`）——只要第一步做好了，且默认值（`0.0.0.0:8788`、仓库根 `.venv`）符合你的环境，裸 `add` 就能直接工作。`host`/`port` 会写入被拉起进程的 `DSH_FEISHU_BRIDGE_HOST`/`DSH_FEISHU_BRIDGE_PORT`（见下方"配置参考"）——它们真的会改变 Python 侧实际监听的地址，插件自己的健康检查也跟着同一个值走，两者不会不一致。如需覆盖，在你自己 profile 的 `cordis.patch.yml` 里改同一个 id，例如换解释器和端口：
 
    ```yaml
    - insert:

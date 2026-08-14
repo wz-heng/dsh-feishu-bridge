@@ -74,7 +74,7 @@ Instead of running the standalone process above, `dsh plugin add` can install th
    pip install -e .
    ```
 
-   Set `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_ALLOWED_OPEN_IDS` / etc. — either exported in the shell that starts `dsh`, or in a `.env` file at this repo's root (`KEY=value` per line; the plugin reads it directly and merges it into the spawned process's environment, since the Python side itself only reads `process.env`).
+   Set `FEISHU_APP_ID` / `FEISHU_APP_SECRET` / `FEISHU_ALLOWED_OPEN_IDS` / etc. — either exported in the shell that starts `dsh`, or in a `.env` file at this repo's root (`KEY=value` per line; the plugin reads it directly and merges it into the spawned process's inherited environment, since the Python side itself only reads `os.environ`).
 
 2. **Then add the plugin to your profile:**
 
@@ -84,7 +84,7 @@ Instead of running the standalone process above, `dsh plugin add` can install th
 
    `dsh` starts the bridge as a managed child the next time that profile boots: it spawns `<repo>/.venv/bin/python -m dsh_feishu_bridge` (falling back to `python3` on `PATH` if no `.venv` exists at the repo root), waits for `GET /health` to report `{"status": "ok"}`, and on profile/plugin dispose sends `SIGTERM`, escalating to `SIGKILL` if the process hasn't exited within 5 seconds — the same clean-shutdown behavior as `Ctrl-C`-ing the standalone process, just automatic.
 
-   Every row config field is optional (`host`, `port`, `pythonBin`, `startupTimeoutMs`, `env`) — a bare `add` with no row edits works as long as step 1 is done and the defaults (`0.0.0.0:8788`, repo-root `.venv`) match your setup. Override in your profile's own `cordis.patch.yml`, e.g. to point at a different interpreter:
+   Every row config field is optional (`host`, `port`, `pythonBin`, `startupTimeoutMs`, `env`) — a bare `add` with no row edits works as long as step 1 is done and the defaults (`0.0.0.0:8788`, repo-root `.venv`) match your setup. `host`/`port` set `DSH_FEISHU_BRIDGE_HOST`/`DSH_FEISHU_BRIDGE_PORT` in the spawned process's env (see "Configuration reference" below) — they change where the Python side actually binds, and the plugin's own health check follows the same value, so the two never drift apart. Override in your profile's own `cordis.patch.yml`, e.g. to point at a different interpreter and port:
 
    ```yaml
    - insert:

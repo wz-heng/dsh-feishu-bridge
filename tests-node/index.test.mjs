@@ -1,10 +1,20 @@
-import { test } from 'node:test'
+import { test, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply, name } from '../lib/index.mjs'
 import { FakeChild } from './helpers/fake-child.mjs'
+
+// Every apply() call below starts a health-check loop that, left un-disposed,
+// keeps a real timer alive for up to `startupTimeoutMs` (30s by default) —
+// exactly the zombie-timer bug this plugin fixed in lib/health.mjs. Tests
+// that only care about spawn args/env, not the health outcome, would
+// otherwise still hold the whole file open. Track every ctx's disposer here
+// and auto-dispose after each test, mirroring real plugin lifecycle (a
+// cordis scope always eventually disposes) instead of trusting each test to
+// remember.
+let pendingDisposers = []
 
 function makeCtx() {
   const logs = { info: [], warn: [] }
@@ -16,12 +26,21 @@ function makeCtx() {
     dispose: undefined,
     effect(setup) {
       const result = setup()
-      if (typeof result === 'function') ctx.dispose = result
+      if (typeof result === 'function') {
+        ctx.dispose = result
+        pendingDisposers.push(result)
+      }
       return result
     },
   }
   return { ctx, logs }
 }
+
+afterEach(async () => {
+  const disposers = pendingDisposers
+  pendingDisposers = []
+  await Promise.all(disposers.map((dispose) => dispose()))
+})
 
 function neverHealthy() {
   // Resolves the health promise's rejection branch quickly without a real timer wait.
@@ -97,6 +116,74 @@ test('apply resolves the health-check URL against 127.0.0.1 when host is 0.0.0.0
   assert.equal(urlsProbed[0], 'http://127.0.0.1:9999/health')
 })
 
+test('apply: explicit config.host/port are passed to the child as DSH_FEISHU_BRIDGE_HOST/PORT, not just used for the health URL', async () => {
+  const { ctx } = makeCtx()
+  let capturedEnv
+  const spawnImpl = (cmd, args, opts) => {
+    capturedEnv = opts.env
+    return new FakeChild()
+  }
+  apply(ctx, {
+    repoRoot: '/repo',
+    pythonBin: 'python3',
+    host: '127.0.0.1',
+    port: 9999,
+    internals: { spawnImpl, fetchImpl: neverHealthy(), readFile: () => '' },
+  })
+  assert.equal(capturedEnv.DSH_FEISHU_BRIDGE_HOST, '127.0.0.1')
+  assert.equal(capturedEnv.DSH_FEISHU_BRIDGE_PORT, '9999')
+})
+
+test('apply derives the health URL from a port set only via .env, with no config.port row edit', async () => {
+  const { ctx } = makeCtx()
+  const urlsProbed = []
+  const spawnImpl = () => new FakeChild()
+  const fetchImpl = async (url) => {
+    urlsProbed.push(url)
+    return { ok: true, status: 200, json: async () => ({ status: 'ok' }) }
+  }
+  apply(ctx, {
+    repoRoot: '/repo',
+    pythonBin: 'python3',
+    internals: { spawnImpl, fetchImpl, readFile: () => 'DSH_FEISHU_BRIDGE_PORT=8799\n' },
+  })
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(urlsProbed[0], 'http://127.0.0.1:8799/health')
+})
+
+test('apply: config.port overrides a conflicting .env DSH_FEISHU_BRIDGE_PORT', async () => {
+  const { ctx } = makeCtx()
+  let capturedEnv
+  const spawnImpl = (cmd, args, opts) => {
+    capturedEnv = opts.env
+    return new FakeChild()
+  }
+  apply(ctx, {
+    repoRoot: '/repo',
+    pythonBin: 'python3',
+    port: 9001,
+    internals: { spawnImpl, fetchImpl: neverHealthy(), readFile: () => 'DSH_FEISHU_BRIDGE_PORT=8799\n' },
+  })
+  assert.equal(capturedEnv.DSH_FEISHU_BRIDGE_PORT, '9001')
+})
+
+test('apply: config.env is the final override, beating a config.port-derived DSH_FEISHU_BRIDGE_PORT', async () => {
+  const { ctx } = makeCtx()
+  let capturedEnv
+  const spawnImpl = (cmd, args, opts) => {
+    capturedEnv = opts.env
+    return new FakeChild()
+  }
+  apply(ctx, {
+    repoRoot: '/repo',
+    pythonBin: 'python3',
+    port: 9001,
+    env: { DSH_FEISHU_BRIDGE_PORT: '9500' },
+    internals: { spawnImpl, fetchImpl: neverHealthy(), readFile: () => '' },
+  })
+  assert.equal(capturedEnv.DSH_FEISHU_BRIDGE_PORT, '9500')
+})
+
 test('apply logs a warning when the health check never succeeds within the timeout', async () => {
   const { ctx, logs } = makeCtx()
   const spawnImpl = () => new FakeChild()
@@ -141,6 +228,25 @@ test('dispose (ctx.effect cleanup) kills the child and waits for confirmation', 
   await ctx.dispose()
   assert.deepEqual(child.killCalls, ['SIGTERM'])
   assert.equal(child.exitCode, 0)
+})
+
+test('dispose aborts a still-pending health check promptly instead of waiting out startupTimeoutMs', async () => {
+  const { ctx, logs } = makeCtx()
+  const spawnImpl = () => new FakeChild()
+  // A slow-retrying, never-healthy backend: a long interval/timeout means a
+  // pre-fix dispose would have to wait for this loop's own bookkeeping.
+  const fetchImpl = async () => { throw new Error('connect ECONNREFUSED') }
+  apply(ctx, {
+    repoRoot: '/repo',
+    pythonBin: 'python3',
+    startupTimeoutMs: 60_000,
+    internals: { spawnImpl, fetchImpl, readFile: () => '' },
+  })
+  const started = Date.now()
+  await ctx.dispose()
+  assert.ok(Date.now() - started < 1000, 'dispose must not block on the health-check loop')
+  // The disposing flag suppresses the would-be "did not become healthy" warning too.
+  assert.ok(!logs.warn.some((line) => line.includes('did not become healthy')))
 })
 
 test('an unexpected exit before dispose logs a warning; a dispose-triggered exit does not', async () => {

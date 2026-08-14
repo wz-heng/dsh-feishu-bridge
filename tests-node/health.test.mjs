@@ -55,3 +55,53 @@ test('waitForHealthy treats a 200 with the wrong body shape as unhealthy', async
     /unexpected health body/,
   )
 })
+
+test('waitForHealthy rejects promptly when aborted mid-sleep, without waiting out timeoutMs', async () => {
+  const controller = new AbortController()
+  const fetchImpl = async () => jsonResponse(503, {})
+  const promise = waitForHealthy({
+    url: 'http://x/health',
+    timeoutMs: 5000,
+    intervalMs: 2000,
+    fetchImpl,
+    signal: controller.signal,
+  })
+  const started = Date.now()
+  // Abort well before the first retry's sleep would naturally elapse.
+  setTimeout(() => controller.abort(), 20)
+  await assert.rejects(promise, /aborted/)
+  assert.ok(Date.now() - started < 500, 'abort must interrupt the sleep, not wait out intervalMs/timeoutMs')
+})
+
+test('waitForHealthy rejects immediately when already aborted before the first attempt', async () => {
+  const controller = new AbortController()
+  controller.abort()
+  let calls = 0
+  const fetchImpl = async () => {
+    calls += 1
+    return jsonResponse(200, { status: 'ok' })
+  }
+  await assert.rejects(
+    waitForHealthy({ url: 'http://x/health', timeoutMs: 1000, intervalMs: 10, fetchImpl, signal: controller.signal }),
+    /aborted/,
+  )
+  assert.equal(calls, 0, 'an already-aborted signal must skip fetching entirely')
+})
+
+test('waitForHealthy leaves no pending sleep timer after abort (process can exit promptly)', async () => {
+  const controller = new AbortController()
+  const fetchImpl = async () => jsonResponse(503, {})
+  const promise = waitForHealthy({
+    url: 'http://x/health',
+    timeoutMs: 60_000,
+    intervalMs: 30_000,
+    fetchImpl,
+    signal: controller.signal,
+  })
+  await new Promise((resolve) => setTimeout(resolve, 10))
+  controller.abort()
+  await assert.rejects(promise, /aborted/)
+  // If the sleep's setTimeout were still pending and referenced, this test
+  // file's process would hang for up to 30s waiting for it — the original
+  // bug this fixes. Reaching this point quickly is the assertion.
+})

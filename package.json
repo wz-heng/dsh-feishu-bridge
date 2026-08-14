@@ -10,13 +10,6 @@
     },
     "./package.json": "./package.json"
   },
-  "files": [
-    "lib",
-    "cordis.patch.yml",
-    "README.md",
-    "README.zh.md",
-    "LICENSE"
-  ],
   "engines": {
     "node": ">=18.17.0"
   },
