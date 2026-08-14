@@ -98,6 +98,15 @@ class DshAdapter:
         self._config = config
         self._harness: DeepSeekHarness | None = None
         self._start_lock = asyncio.Lock()
+        # Tracks calls currently blocked inside asyncio.to_thread(harness.run,
+        # ...). close() waits for this to drain before closing the harness —
+        # cancelling the asyncio Task that awaits a to_thread call does NOT
+        # stop the underlying thread, so without this, close() could run
+        # harness.close() concurrently with an in-flight harness.run() on the
+        # same SDK client (Snape review round 2).
+        self._inflight = 0
+        self._idle = asyncio.Event()
+        self._idle.set()
 
     async def _ensure_started(self) -> DeepSeekHarness:
         if self._harness is not None:
@@ -124,6 +133,8 @@ class DshAdapter:
 
     async def run_turn(self, session_id: str, text: str) -> DshTurnResult:
         harness = await self._ensure_started()
+        self._inflight += 1
+        self._idle.clear()
         try:
             result = await asyncio.to_thread(
                 harness.run, text, session_id=session_id
@@ -131,13 +142,43 @@ class DshAdapter:
         except HarnessError as exc:
             logger.exception("dsh turn failed for session %s", session_id)
             raise DshAdapterError(str(exc)) from exc
+        finally:
+            self._inflight -= 1
+            if self._inflight == 0:
+                self._idle.set()
         return DshTurnResult(
             session_id=result.session_id,
             text=result.final_response,
             finish_reason=result.finish_reason,
         )
 
-    async def close(self) -> None:
+    async def close(self, *, wait_timeout: float = 30.0) -> None:
+        """Close the harness subprocess.
+
+        Waits for any in-flight ``run_turn`` call to finish naturally before
+        closing — cancelling the caller's asyncio Task (SessionManager.
+        shutdown()) doesn't stop the underlying blocking thread, so closing
+        immediately could run ``harness.close()`` concurrently with an
+        in-flight ``harness.run()`` on the same SDK client. ``wait_timeout``
+        is a bounded escape hatch, not a guarantee: past it we close anyway
+        and log loudly, rather than hang shutdown forever on a truly stuck
+        call.
+        """
+        if self._inflight:
+            logger.warning(
+                "Closing dsh adapter with %d turn(s) still in flight; "
+                "waiting up to %ss for them to finish",
+                self._inflight,
+                wait_timeout,
+            )
+            try:
+                await asyncio.wait_for(self._idle.wait(), timeout=wait_timeout)
+            except TimeoutError:
+                logger.error(
+                    "dsh adapter close() timed out waiting for %d in-flight "
+                    "turn(s); closing the harness anyway",
+                    self._inflight,
+                )
         harness = self._harness
         self._harness = None
         if harness is not None:

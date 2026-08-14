@@ -164,12 +164,13 @@ class SessionManager:
         for task in tasks:
             task.cancel()
         if tasks:
-            # Best-effort: this awaits the asyncio-level cancellation, but a
-            # turn blocked inside asyncio.to_thread (the SDK's synchronous
-            # call) keeps running in its worker thread regardless — cancelling
-            # the awaiting task doesn't stop that thread. Waiting here still
-            # matters: it sequences shutdown so backend.close() never races a
-            # turn that's still between "cancelled" and "thread actually
-            # returned", instead of firing both at once.
+            # This cancels promptly for a turn still queued behind another
+            # turn's per-session lock, but NOT for one already inside
+            # backend.run_turn() — cancelling the awaiting asyncio Task
+            # doesn't stop the underlying blocking thread. That residual race
+            # (this close() call racing a still-running harness.run() thread)
+            # is closed one layer down, in DshAdapter.close(), which tracks
+            # in-flight calls and waits for them before actually closing the
+            # harness.
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._backend.close()

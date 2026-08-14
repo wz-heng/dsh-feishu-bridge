@@ -177,9 +177,18 @@ class TestCommands:
     async def test_switch_to_existing_session(
         self, manager: BridgeManager, bridge: MockBridge, session_mgr: SessionManager
     ):
-        s = await session_mgr.create_session()
+        s = await session_mgr.create_session(owner="mock:c1")
         await manager.handle_incoming("mock", "c1", f"/switch {s.id}", bridge)
         assert manager.get_session_id("mock", "c1") == s.id
+
+    async def test_switch_to_unowned_session_rejected(
+        self, manager: BridgeManager, bridge: MockBridge, session_mgr: SessionManager
+    ):
+        # Snape should-fix: owner=None must not be an implicit allow-all.
+        s = await session_mgr.create_session()  # no owner
+        await manager.handle_incoming("mock", "c1", f"/switch {s.id}", bridge)
+        assert "not found" in bridge.sent[-1][2]["text"]
+        assert manager.get_session_id("mock", "c1") is None
 
     async def test_current_no_session(self, manager: BridgeManager, bridge: MockBridge):
         await manager.handle_incoming("mock", "c1", "/current", bridge)

@@ -6,6 +6,8 @@ mimics its synchronous ``start()`` / ``run()`` / ``close()`` contract
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from dataclasses import dataclass
 
 import pytest
@@ -105,3 +107,67 @@ async def test_config_forwarded_to_harness_config():
     assert forwarded.model == "m"
     assert forwarded.max_tokens == 123
     assert forwarded.api_key == "k"
+
+
+# --------------------------------------------------------------------------
+# close() vs. an in-flight run_turn() — Snape review round 2: cancelling the
+# asyncio Task awaiting run_turn() doesn't stop the underlying OS thread, so
+# close() must wait for it rather than close the harness out from under it.
+# These use a REAL background thread (via asyncio.to_thread inside run_turn)
+# gated by threading.Event, since the point is to prove close() actually
+# blocks on genuine in-flight thread work, not just an awaited coroutine.
+# --------------------------------------------------------------------------
+
+
+async def test_close_waits_for_inflight_turn_before_closing_harness(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    order: list[str] = []
+
+    class SlowHarness(_StubHarness):
+        def run(self, text: str, *, session_id: str):
+            started.set()
+            release.wait(timeout=2.0)
+            order.append("run_returned")
+            return super().run(text, session_id=session_id)
+
+        def close(self) -> None:
+            order.append("closed")
+            super().close()
+
+    monkeypatch.setattr(dsh_adapter_module, "DeepSeekHarness", SlowHarness)
+    adapter = DshAdapter(DshAdapterConfig())
+
+    run_task = asyncio.create_task(adapter.run_turn("s1", "hello"))
+    await asyncio.to_thread(started.wait, 2.0)
+    assert started.is_set(), "run() never started on its worker thread"
+
+    close_task = asyncio.create_task(adapter.close(wait_timeout=2.0))
+    await asyncio.sleep(0.05)  # let close() reach its wait — it must not
+    assert order == [], "close() closed the harness while a turn was still running"
+
+    release.set()
+    await run_task
+    await close_task
+    assert order == ["run_returned", "closed"]
+
+
+async def test_close_force_closes_after_timeout_instead_of_hanging(monkeypatch):
+    release = threading.Event()  # deliberately never set within the test
+
+    class StuckHarness(_StubHarness):
+        def run(self, text: str, *, session_id: str):
+            release.wait(timeout=5.0)
+            return super().run(text, session_id=session_id)
+
+    monkeypatch.setattr(dsh_adapter_module, "DeepSeekHarness", StuckHarness)
+    adapter = DshAdapter(DshAdapterConfig())
+    run_task = asyncio.create_task(adapter.run_turn("s1", "hi"))
+    await asyncio.sleep(0.05)  # let it enter the blocking call
+
+    # Bounded timeout is an escape hatch, not a guarantee — close() must
+    # still return promptly rather than hang shutdown forever.
+    await asyncio.wait_for(adapter.close(wait_timeout=0.1), timeout=1.0)
+
+    release.set()  # let the stuck thread finish so it doesn't outlive the test
+    await asyncio.wait_for(run_task, timeout=2.0)

@@ -67,7 +67,17 @@ class BridgeManager:
         (Feishu), so swallowing its start error would leave the FastAPI
         lifespan reporting a healthy, fully-started process while the bot is
         actually not connected to anything — silent degradation, not
-        graceful degradation. Let it propagate so uvicorn fails to boot."""
+        graceful degradation. Let it propagate so uvicorn fails to boot.
+
+        NOT yet safe for multiple bridges: if a second bridge were registered
+        and failed after a first one already started, this raises without
+        rolling the first one back — app.py's lifespan `try/finally` only
+        wraps `yield`, which starts after this returns. FeishuBridge itself
+        rolls back its own partial start on failure (see its `start()`), so
+        v1's single-bridge case has no leak; a second bridge type would need
+        start_all() itself to stop whatever it already started before
+        re-raising.
+        """
         for name, bridge in self._bridges.items():
             await bridge.start()
             logger.info("Bridge '%s' started", name)
@@ -207,7 +217,13 @@ class BridgeManager:
         session = self.session_mgr.get_session(session_id)
         if session is None:
             return f"Session '{session_id}' not found."
-        if session.owner is not None and session.owner != self._mapping_key(platform, chat_id):
+        # Exact match required — an unowned (owner=None) session is NOT an
+        # implicit allow-all. Every production creation path (handle_incoming,
+        # /new) always sets owner; a None owner only happens by calling
+        # SessionManager.create_session() directly with no owner (e.g. a test
+        # or a future non-bridge caller), and fail-closed means that session
+        # stays switchable by nobody until something explicitly claims it.
+        if session.owner != self._mapping_key(platform, chat_id):
             return f"Session '{session_id}' not found."  # don't confirm existence of another chat's session
         self.set_sticky_session(platform, chat_id, session.id)
         return f"Switched to session '{session.name}' ({session.id})."
