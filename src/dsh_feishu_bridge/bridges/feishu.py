@@ -252,10 +252,11 @@ class FeishuBridge(Bridge):
         # Insertion-ordered dict; FIFO-evicted at cap.
         self._nonces: dict[str, dict[str, str]] = {}
 
-        # "timestamp:nonce" -> time received (monotonic), for webhook replay
-        # rejection (see _verify_webhook_request). Insertion-ordered dict;
-        # pruned of window-expired entries on every request, FIFO-evicted at
-        # cap as a defensive floor.
+        # "timestamp:nonce" -> monotonic expiry (when the SIGNED timestamp
+        # itself ages out of the validity window — see
+        # _consume_webhook_nonce), for webhook replay rejection. Pruned of
+        # expired entries on every request, FIFO-evicted at cap as a
+        # defensive floor.
         self._webhook_nonces: dict[str, float] = {}
 
         # The app's main event loop, captured in start(). The SDK delivers
@@ -626,32 +627,47 @@ class FeishuBridge(Bridge):
             ts = int(timestamp)
         except ValueError:
             return False, "timestamp malformed"
-        if abs(time.time() - ts) > WEBHOOK_TIMESTAMP_WINDOW_SECONDS:
+        now_wall = time.time()
+        if abs(now_wall - ts) > WEBHOOK_TIMESTAMP_WINDOW_SECONDS:
             return False, "timestamp outside window"
 
         # Only a request that already passed signature + timestamp consumes a
         # replay-cache slot — an attacker without the encrypt key can't burn
         # through it with forged (timestamp, nonce) pairs.
-        if not self._consume_webhook_nonce(f"{timestamp}:{nonce}"):
+        if not self._consume_webhook_nonce(f"{timestamp}:{nonce}", ts, now_wall):
             return False, "nonce replay"
 
         return True, ""
 
-    def _consume_webhook_nonce(self, key: str) -> bool:
-        """True (and records it) the first time `key` is seen within the
-        current window; False on a repeat — the replay-rejection gate."""
-        now = time.monotonic()
-        cutoff = now - WEBHOOK_TIMESTAMP_WINDOW_SECONDS
-        stale = [k for k, seen_at in self._webhook_nonces.items() if seen_at < cutoff]
-        for k in stale:
+    def _consume_webhook_nonce(self, key: str, ts: int, now_wall: float) -> bool:
+        """True (and records it) the first time `key` is seen while its
+        SIGNED timestamp is still inside the validity window; False on a
+        repeat — the replay-rejection gate.
+
+        The cache entry's TTL tracks how much longer `ts` itself stays valid
+        (``ts + WEBHOOK_TIMESTAMP_WINDOW_SECONDS - now``), NOT a flat window
+        from receipt time. A flat receipt-time TTL and the timestamp check's
+        own ±window overlap asymmetrically: a request signed up to
+        ``WEBHOOK_TIMESTAMP_WINDOW_SECONDS`` in the future keeps passing the
+        timestamp check for up to ``2 * WEBHOOK_TIMESTAMP_WINDOW_SECONDS``
+        after receipt, so a receipt-time TTL of just one window would forget
+        the nonce while the timestamp check would still accept a replay.
+        Tying the TTL to the signed timestamp's own expiry closes that gap:
+        the nonce is remembered for exactly as long as a replay could still
+        pass the timestamp check, never more, never less.
+        """
+        now_mono = time.monotonic()
+        expired = [k for k, expiry in self._webhook_nonces.items() if expiry <= now_mono]
+        for k in expired:
             self._webhook_nonces.pop(k, None)
 
         if key in self._webhook_nonces:
             return False
+        ttl = max(0.0, (ts + WEBHOOK_TIMESTAMP_WINDOW_SECONDS) - now_wall)
         if len(self._webhook_nonces) >= MAX_WEBHOOK_NONCES:
             oldest = next(iter(self._webhook_nonces))
             self._webhook_nonces.pop(oldest, None)
-        self._webhook_nonces[key] = now
+        self._webhook_nonces[key] = now_mono + ttl
         return True
 
     # --- authorization -------------------------------------------------------

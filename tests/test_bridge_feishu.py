@@ -310,6 +310,51 @@ class TestWebhookVerification:
         status, _ = await b.handle_webhook(lowered, self.BODY)
         assert status == 200
 
+    async def test_replay_rejected_even_at_future_skew_and_ttl_edge(self, monkeypatch):
+        """Snape's should-finding: a receipt-time-only nonce-cache TTL leaves
+        a gap. A request signed up to WEBHOOK_TIMESTAMP_WINDOW_SECONDS in the
+        future still passes the timestamp check for up to 2x the window
+        after receipt — so the nonce must be remembered for that long, not
+        just one window, or a replay lands right in the gap."""
+        b = self._bridge()
+        base_wall = time.time()
+        base_mono = time.monotonic()
+        offset = {"s": 0.0}
+
+        monkeypatch.setattr(time, "time", lambda: base_wall + offset["s"])
+        monkeypatch.setattr(time, "monotonic", lambda: base_mono + offset["s"])
+
+        future_ts = str(int(base_wall) + 299)  # just inside the +window edge
+        headers = _webhook_headers(self.BODY, timestamp=future_ts, nonce="future-edge")
+
+        status1, _ = await b.handle_webhook(headers, self.BODY)
+        assert status1 == 200
+
+        # A flat one-window receipt-time TTL would have evicted the nonce by
+        # now, yet the SIGNED timestamp (fixed at future_ts) is still only
+        # ~2s outside "now" — comfortably inside the timestamp check's own
+        # window — so a correct implementation must still reject the replay.
+        offset["s"] += 301
+
+        status2, _ = await b.handle_webhook(headers, self.BODY)
+        assert status2 != 200
+        assert b._channel.handle_webhook_request.await_count == 1
+
+    async def test_nonce_forgotten_once_signed_timestamp_truly_expires(self):
+        """The flip side of the TTL fix: once `ts` itself falls outside the
+        window, a replay is rejected by the timestamp check regardless, so
+        the nonce-cache entry is free to be forgotten — it must not linger
+        forever and leak memory."""
+        b = self._bridge()
+        old = str(int(time.time()) - 3600)
+        headers = _webhook_headers(self.BODY, timestamp=old, nonce="n1", signature="irrelevant")
+        # This request never reaches the nonce check (it fails signature,
+        # and would also fail the timestamp check) — confirms a rejected
+        # request never occupies a replay-cache slot in the first place.
+        status, _ = await b.handle_webhook(headers, self.BODY)
+        assert status != 200
+        assert len(b._webhook_nonces) == 0
+
 
 # --------------------------------------------------------------------------
 # Inbound: fail-closed authorization + routing
