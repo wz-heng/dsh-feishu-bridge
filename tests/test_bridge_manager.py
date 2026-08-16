@@ -277,6 +277,75 @@ class TestStartAllPropagatesFailure:
         await manager.handle_incoming("mock", "c1", "/bogus", bridge)
         assert "Unknown command" in bridge.sent[-1][2]["text"]
 
-    async def test_tool_decision_always_false(self, manager: BridgeManager):
+    async def test_tool_decision_false_with_no_approval_gateway(self, manager: BridgeManager):
+        # `manager` fixture builds BridgeManager(session_mgr) with no
+        # ApprovalGateway (approval mode off, the default) — there is never
+        # a pending approval to settle.
         applied = await manager.handle_tool_decision("mock", "c1", "s1", "t1", True)
         assert applied is False
+
+
+class TestToolDecisionWithApprovalGateway:
+    """handle_tool_decision with a real ApprovalGateway wired in — session
+    lookup + ownership enforcement happens in BridgeManager, resolution in
+    the gateway (see test_approval_gateway.py for the gateway's own
+    behavior)."""
+
+    @pytest.fixture
+    def gateway(self):
+        from dsh_feishu_bridge.approval_gateway import ApprovalGateway
+
+        return ApprovalGateway(
+            notify=_noop_notify, session_exists=lambda _sid: True, timeout_seconds=5.0
+        )
+
+    @pytest.fixture
+    def manager_with_gateway(self, session_mgr: SessionManager, gateway) -> BridgeManager:
+        m = BridgeManager(session_mgr, gateway)
+        m.register_broadcast()
+        return m
+
+    async def test_resolves_pending_decision_for_the_owning_chat(
+        self, manager_with_gateway: BridgeManager, session_mgr: SessionManager, gateway
+    ):
+        session = await session_mgr.create_session(owner="mock:c1")
+        future = asyncio.get_running_loop().create_future()
+        gateway._pending[(session.id, "t1")] = future
+
+        applied = await manager_with_gateway.handle_tool_decision(
+            "mock", "c1", session.id, "t1", True
+        )
+        assert applied is True
+        assert await future == "allowed-once"
+
+    async def test_rejects_when_chat_does_not_own_the_session(
+        self, manager_with_gateway: BridgeManager, session_mgr: SessionManager, gateway
+    ):
+        session = await session_mgr.create_session(owner="mock:c1")
+        future = asyncio.get_running_loop().create_future()
+        gateway._pending[(session.id, "t1")] = future
+
+        applied = await manager_with_gateway.handle_tool_decision(
+            "mock", "c2", session.id, "t1", True
+        )
+        assert applied is False
+        assert not future.done()
+
+    async def test_rejects_unknown_session(self, manager_with_gateway: BridgeManager):
+        applied = await manager_with_gateway.handle_tool_decision(
+            "mock", "c1", "no-such-session", "t1", True
+        )
+        assert applied is False
+
+    async def test_false_when_nothing_pending_in_the_gateway(
+        self, manager_with_gateway: BridgeManager, session_mgr: SessionManager
+    ):
+        session = await session_mgr.create_session(owner="mock:c1")
+        applied = await manager_with_gateway.handle_tool_decision(
+            "mock", "c1", session.id, "t1", True
+        )
+        assert applied is False
+
+
+async def _noop_notify(session_id, tool_use_id, tool_name, tool_input) -> None:
+    pass

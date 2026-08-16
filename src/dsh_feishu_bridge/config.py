@@ -28,6 +28,13 @@ def _split_csv(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+def _parse_bool(value: str) -> bool:
+    return value.strip().lower() in _TRUE_VALUES
+
+
 @dataclass(slots=True)
 class Settings:
     # Feishu
@@ -50,6 +57,11 @@ class Settings:
     dsh_session_root: str | None = None
     dsh_workspace: str | None = None
 
+    # Remote tool approval (docs/architecture.md "Remote tool approval") —
+    # off by default, existing deployments unaffected.
+    dsh_approval_mode: bool = False
+    dsh_approval_timeout_seconds: float = 60.0
+
     # HTTP server (webhook transport + health check)
     host: str = "0.0.0.0"
     port: int = 8788
@@ -69,7 +81,25 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
         _apply_yaml(settings, data)
 
     _apply_env(settings)
+    _validate(settings)
     return settings
+
+
+def _validate(settings: Settings) -> None:
+    if settings.dsh_approval_mode and settings.dsh_cordis:
+        # Approval mode ships its own composition (bundled cordis.yml, see
+        # approval_runtime/) that a caller-supplied one would silently
+        # replace, composing none of the approval plugins — a tool call
+        # would then hang until ApprovalService's own no-answerer default
+        # ('unavailable'), discovered live rather than at boot. Fail loud
+        # instead: either drop dsh_cordis (use the bundled composition), or
+        # compose approval_runtime's two plugins into the custom one — see
+        # README "Remote tool approval".
+        raise ConfigError(
+            "DSH_APPROVAL_MODE is set together with a custom DSH_CORDIS — "
+            "approval mode ships its own runtime composition; see README "
+            "'Remote tool approval' for how to combine the two."
+        )
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -100,6 +130,10 @@ def _apply_yaml(settings: Settings, data: dict[str, Any]) -> None:
     settings.dsh_cordis = dsh.get("cordis", settings.dsh_cordis)
     settings.dsh_session_root = dsh.get("session_root", settings.dsh_session_root)
     settings.dsh_workspace = dsh.get("workspace", settings.dsh_workspace)
+    settings.dsh_approval_mode = bool(dsh.get("approval_mode", settings.dsh_approval_mode))
+    settings.dsh_approval_timeout_seconds = float(
+        dsh.get("approval_timeout_seconds", settings.dsh_approval_timeout_seconds)
+    )
 
     server = data.get("server") or {}
     settings.host = server.get("host", settings.host)
@@ -136,6 +170,10 @@ def _apply_env(settings: Settings) -> None:
     settings.dsh_cordis = env.get("DSH_CORDIS", settings.dsh_cordis)
     settings.dsh_session_root = env.get("DSH_SESSION_ROOT", settings.dsh_session_root)
     settings.dsh_workspace = env.get("DSH_WORKSPACE", settings.dsh_workspace)
+    if "DSH_APPROVAL_MODE" in env:
+        settings.dsh_approval_mode = _parse_bool(env["DSH_APPROVAL_MODE"])
+    if "DSH_APPROVAL_TIMEOUT_SECONDS" in env:
+        settings.dsh_approval_timeout_seconds = float(env["DSH_APPROVAL_TIMEOUT_SECONDS"])
 
     settings.host = env.get("DSH_FEISHU_BRIDGE_HOST", settings.host)
     if "DSH_FEISHU_BRIDGE_PORT" in env:

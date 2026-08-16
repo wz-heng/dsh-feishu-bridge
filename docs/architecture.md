@@ -29,22 +29,81 @@ treats the SDK call as atomic: `SessionManager._run_turn` broadcasts a
 the final text as one `assistant_text` event. Revisit this once the SDK
 documents its notification event schema for v1.
 
-## Why there's no tool-approval flow
+## Remote tool approval
 
-Same root cause: the bundled example `dsh` composition
-(`deepseek-harness-runtime-bin`'s default, `danger-full-access` bash +
-`str_replace_editor`) never raises an interactive approval request, and the
-high-level `Session` API used here has no callback for a server-initiated
-`request` even if a future composition added one — only the low-level
-`HarnessClient.next_request()`/`respond()` does, and adopting that would mean
-dropping to the low-level client entirely (no more `Session.run()`
-convenience). `FeishuBridge.send_tool_approval_request` and the "approval"
-nonce-kind branch in `_on_card_action` are kept (ported from the source
-bridge, unit-tested directly) so the interface and card-security machinery
-are ready if a future dsh composition adds approval-gated tools and this
-adapter grows a hook for it — but no code path exercises them today.
-`BridgeManager.handle_tool_decision` always returns `False` for the same
-reason: there is never a pending approval to settle.
+Opt-in (`DSH_APPROVAL_MODE=1`; off by default — existing deployments are
+unaffected). When on, every `bash` tool call blocks until a human taps
+Allow/Deny on a Feishu card in the session's owning chat, defaulting to deny
+on timeout.
+
+The bundled default composition (`deepseek-harness-runtime-bin`'s
+`danger-full-access` bash — no other tool is even model-facing today; the
+mounted spine, `@deepseek-ai/dsh-agent-spine-demo`, wires up `bash` plus
+skill/job/goal tools and nothing file-write-shaped, so an earlier draft of
+this doc's claim of a bundled `str_replace_editor` tool was simply wrong)
+never raises an approval request. Reaching one needs a different
+composition, and reverse-engineering the compiled runtime binary
+(`deepseek-harness-runtime-bin`'s `dsh-jsonrpc-agent-pkg-*`, which embeds its
+own unminified source — extracted with `strings -a` and cross-referenced by
+package name) turned up two paths, not the one originally assumed:
+
+- **Dead end**: `HarnessClient.next_request()`/`respond()` exist on the
+  Python SDK side and the wire protocol can carry a server-initiated
+  request in principle. But `@deepseek-ai/dsh-sdk-jsonrpc-server` — the
+  specific server plugin this SDK talks to — never sends one:
+  `HarnessSdkJsonRpcServer.handleRequest()` is a closed switch over exactly
+  `initialize`/`session/prompt`/`shutdown`, and the `JsonRpcLineTransport`
+  instance is a local variable inside that package's `apply()`, never
+  registered as an injectable cordis service and never wired to the
+  approval seam. `@deepseek-ai/dsh-acp` DOES answer approval requests over
+  a real request (`session/request_permission`, the standard Agent Client
+  Protocol method — it embeds `@agentclientprotocol/sdk`), but it binds its
+  own `AgentSideConnection` directly to stdio with a wire format
+  incompatible with this SDK (`session/new`/`session/prompt`/
+  `session/update` vs. this SDK's `initialize`/`session/prompt`/
+  `session.event`), and composing both over the same stdio would corrupt
+  both protocols. Adopting it would mean writing a second Python ACP client
+  from scratch and discarding `deepseek_harness_sdk` entirely — out of
+  scope.
+- **What's actually used**: approval gating is a *generic, tool-agnostic*
+  mechanism, independent of both of the above. Any composed plugin can
+  return `{kind: 'ask', reason}` from the `tools/pre-execute` waterfall
+  (`@deepseek-ai/dsh-tool-bash`'s own source even carries a
+  `TODO(permissions)` comment naming this exact extension point); that
+  routes through the tool registry's `serviceAsk()` into
+  `@deepseek-ai/dsh-user-approval`'s `ApprovalService.request()`, which
+  raises an `approval/request` waterfall any composed answerer can settle.
+  Critically, none of this needs a sandboxing bash executor —
+  `@deepseek-ai/dsh-permission-presets` (the preset/sandbox-mode package)
+  requires one, but the raw `ask`/`ApprovalService` seam does not.
+
+So `approval_runtime/cordis.yml` composes the bundled default (unconfined
+`@deepseek-ai/dsh-bash-local`, unchanged) plus `@deepseek-ai/dsh-user-approval`
+and two small first-party cordis plugins:
+`approval_runtime/pre-execute-gate.mjs` marks `bash` calls `{kind:'ask'}`,
+and `approval_runtime/approval-relay.mjs` answers the resulting
+`approval/request` with a plain HTTP POST — a side channel of this bridge's
+own, not the SDK's stdio protocol — to `ApprovalGateway`
+(`approval_gateway.py`), a loopback-only server (`127.0.0.1`, never the
+public app) started alongside the FastAPI app. `ApprovalGateway.url` is
+handed to the harness subprocess via `DSH_APPROVAL_CALLBACK_URL` when
+`DshAdapterConfig.env` is built (see `app.py`). The gateway publishes a
+`tool_approval_request` broadcast through the *existing*
+`SessionManager`/`Bridge.handle_event` fan-out (`FeishuBridge.
+send_tool_approval_request` and the "approval" nonce-kind branch in
+`_on_card_action` were ported from the source bridge and unit-tested from
+day one — this is the first thing that actually drives them), and
+`BridgeManager.handle_tool_decision` resolves the gateway's pending future
+once a card is tapped, after re-checking session ownership server-side (the
+same check `switch_session` applies — nonce scoping alone already limits a
+card to the chat it was sent to, but this is defense in depth, not the only
+gate). Every failure path — timeout, malformed callback body, an unknown
+session, the harness subprocess never calling back at all — resolves to
+deny; nothing in this design can fail open.
+
+`run_turn`'s blocking `harness.run()` call needed no changes: the whole
+approval round-trip happens on the loopback side channel, fully orthogonal
+to the stdio JSON-RPC channel `run_turn` is already blocked on.
 
 ## Why sticky sessions don't survive a restart
 

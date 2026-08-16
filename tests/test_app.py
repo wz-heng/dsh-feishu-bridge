@@ -50,3 +50,27 @@ def test_webhook_route_not_mounted_in_ws_mode():
     app = build_app(_settings(feishu_transport="ws", feishu_verification_token=None))
     paths = {route.path for route in app.routes}
     assert "/feishu/webhook" not in paths
+
+
+def test_approval_mode_off_by_default_no_gateway():
+    app = build_app(_settings())
+    assert app.state.approval_gateway is None
+
+
+def test_approval_mode_starts_gateway_and_wires_the_harness_subprocess_env():
+    app = build_app(_settings(dsh_approval_mode=True, dsh_approval_timeout_seconds=12.0))
+    with TestClient(app):
+        gateway = app.state.approval_gateway
+        assert gateway is not None
+        assert gateway.port is not None
+
+        adapter = app.state.session_manager._backend
+        assert adapter._config.env["DSH_APPROVAL_CALLBACK_URL"] == gateway.url
+        assert adapter._config.env["DSH_APPROVAL_TIMEOUT_MS"] == "12000"
+        assert adapter._config.cordis is not None
+        assert adapter._config.cordis.endswith("cordis.yml")
+
+
+def test_approval_mode_with_custom_cordis_raises():
+    with pytest.raises(RuntimeError, match="DSH_APPROVAL_MODE"):
+        build_app(_settings(dsh_approval_mode=True, dsh_cordis="/custom/cordis.yml"))
