@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import pytest
 from deepseek_harness.errors import TransportClosedError
@@ -22,6 +22,7 @@ class _StubRunResult:
     session_id: str
     final_response: str
     finish_reason: str | None
+    events: list[dict] = field(default_factory=list)
 
 
 class _StubHarness:
@@ -38,6 +39,7 @@ class _StubHarness:
         self.runs: list[tuple[str, str]] = []
         self.next_error: Exception | None = None
         self.next_finish_reason = "completed"
+        self.next_events: list[dict] = []
         _StubHarness.instances.append(self)
 
     def start(self) -> None:
@@ -51,6 +53,7 @@ class _StubHarness:
             session_id=session_id,
             final_response=f"echo: {text}",
             finish_reason=self.next_finish_reason,
+            events=self.next_events,
         )
 
     def close(self) -> None:
@@ -79,6 +82,7 @@ async def test_run_turn_maps_result_fields():
     assert result.session_id == "s1"
     assert result.text == "echo: hello"
     assert result.finish_reason == "completed"
+    assert result.error is None
 
 
 async def test_run_turn_wraps_harness_error():
@@ -87,6 +91,49 @@ async def test_run_turn_wraps_harness_error():
     _StubHarness.instances[0].next_error = TransportClosedError("runtime died")
     with pytest.raises(DshAdapterError, match="runtime died"):
         await adapter.run_turn("s1", "hello")
+
+
+async def test_run_turn_extracts_error_detail_from_turn_end_event():
+    # Matches the real runtime's own turn/end event shape (data.reason.error),
+    # reproduced locally against deepseek-harness-sdk 0.1.0rc6 by forcing an
+    # empty DEEPSEEK_BASE_URL: {"kind": "error", "error": {"code": "TRANSPORT",
+    # "message": "DeepSeek API request to  failed"}}.
+    adapter = DshAdapter(DshAdapterConfig())
+    await adapter.run_turn("warmup", "x")  # start the stub
+    stub = _StubHarness.instances[0]
+    stub.next_finish_reason = "error"
+    stub.next_events = [
+        {
+            "type": "turn/end",
+            "data": {
+                "reason": {
+                    "kind": "error",
+                    "error": {
+                        "message": "DeepSeek API request to  failed",
+                        "code": "TRANSPORT",
+                    },
+                },
+            },
+        },
+    ]
+
+    result = await adapter.run_turn("s1", "hello")
+
+    assert result.finish_reason == "error"
+    assert result.error == "TRANSPORT: DeepSeek API request to  failed"
+
+
+async def test_run_turn_error_detail_absent_when_no_turn_end_error_key():
+    adapter = DshAdapter(DshAdapterConfig())
+    await adapter.run_turn("warmup", "x")  # start the stub
+    stub = _StubHarness.instances[0]
+    stub.next_finish_reason = "max-tokens"
+    stub.next_events = [{"type": "turn/end", "data": {"reason": {"kind": "max-tokens"}}}]
+
+    result = await adapter.run_turn("s1", "hello")
+
+    assert result.finish_reason == "max-tokens"
+    assert result.error is None
 
 
 async def test_close_allows_restart():

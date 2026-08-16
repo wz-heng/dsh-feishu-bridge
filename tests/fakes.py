@@ -18,6 +18,7 @@ class FakeDshBackend:
 
     reply: str = "ok"
     finish_reason: str = "completed"
+    error: str | None = None
     replies_by_session: dict[str, list[str]] = field(default_factory=dict)
     errors_by_session: dict[str, str] = field(default_factory=dict)
     calls: list[tuple[str, str]] = field(default_factory=list)
@@ -33,7 +34,10 @@ class FakeDshBackend:
         else:
             text_out = self.reply
         return DshTurnResult(
-            session_id=session_id, text=text_out, finish_reason=self.finish_reason
+            session_id=session_id,
+            text=text_out,
+            finish_reason=self.finish_reason,
+            error=self.error,
         )
 
     async def close(self) -> None:

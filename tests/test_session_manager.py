@@ -104,6 +104,21 @@ class TestTurns:
         assert "max-tokens" in events[1]["message"]
         assert events[2]["is_error"] is True
 
+    async def test_error_detail_appended_to_broadcast_message_when_present(
+        self, mgr: SessionManager, backend: FakeDshBackend, events: list[dict]
+    ):
+        backend.reply = ""
+        backend.finish_reason = "error"
+        backend.error = "TRANSPORT: DeepSeek API request to  failed"
+        session = await mgr.create_session()
+        await mgr.start_message(session.id, "hello")
+        await _drain(mgr)
+
+        types = [e["type"] for e in events]
+        assert types == ["status", "error", "result", "status"]
+        assert "reason: error" in events[1]["message"]
+        assert "TRANSPORT: DeepSeek API request to  failed" in events[1]["message"]
+
     async def test_second_turn_increments_message_count(
         self, mgr: SessionManager, backend: FakeDshBackend
     ):

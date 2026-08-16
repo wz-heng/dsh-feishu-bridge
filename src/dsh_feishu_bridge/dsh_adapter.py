@@ -57,6 +57,13 @@ class DshTurnResult:
     session_id: str
     text: str
     finish_reason: str | None
+    # Populated whenever finish_reason isn't ("completed", None): the runtime's
+    # own code/message from the last turn/end event's data.reason.error, the
+    # same event finish_reason() already reads .kind from. Without this a turn
+    # that "soft-fails" (empty text, finish_reason="error") instead of raising
+    # is undiagnosable from the outside — see CI run 31948093525, which showed
+    # nothing but an empty string.
+    error: str | None = None
 
 
 class DshBackend(Protocol):
@@ -164,10 +171,14 @@ class DshAdapter:
         except HarnessError as exc:
             logger.exception("dsh turn failed for session %s", session_id)
             raise DshAdapterError(str(exc)) from exc
+        error_detail = None
+        if result.finish_reason not in (None, "completed"):
+            error_detail = _turn_end_error_detail(result.events)
         return DshTurnResult(
             session_id=result.session_id,
             text=result.final_response,
             finish_reason=result.finish_reason,
+            error=error_detail,
         )
 
     def _turn_finished(self) -> None:
@@ -209,6 +220,29 @@ class DshAdapter:
         self._harness = None
         if harness is not None:
             await asyncio.to_thread(harness.close)
+
+
+def _turn_end_error_detail(events: list[dict]) -> str | None:
+    """Pull ``data.reason.error`` out of the last ``turn/end`` event.
+
+    Sibling key to the ``data.reason.kind`` the SDK's own ``finish_reason()``
+    helper already commits to reading (deepseek_harness/api.py), so reading it
+    here relies on nothing more than that same event shape.
+    """
+    for event in reversed(events):
+        if event.get("type") != "turn/end":
+            continue
+        data = event.get("data")
+        reason = data.get("reason") if isinstance(data, dict) else None
+        error = reason.get("error") if isinstance(reason, dict) else None
+        if not isinstance(error, dict):
+            return None
+        message = error.get("message")
+        code = error.get("code")
+        if isinstance(message, str) and isinstance(code, str):
+            return f"{code}: {message}"
+        return message if isinstance(message, str) else None
+    return None
 
 
 def new_session_id() -> str:

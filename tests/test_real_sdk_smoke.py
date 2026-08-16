@@ -30,14 +30,22 @@ async def test_real_turn_runs_and_replies(tmp_path):
             cwd=str(tmp_path),
             session_root=str(tmp_path / "sessions"),
             api_key=os.environ["DEEPSEEK_API_KEY"],
-            base_url=os.environ.get("DEEPSEEK_BASE_URL"),
+            # `or None`, not a bare `.get()`: a CI env referencing an
+            # unconfigured secret (`${{ secrets.DEEPSEEK_BASE_URL }}` with no
+            # such secret set) sets this var to "" rather than omitting it,
+            # and an empty base_url breaks the runtime's request construction
+            # outright (reproduced locally against CI run 31948093525) — so
+            # treat "set but empty" the same as "unset".
+            base_url=os.environ.get("DEEPSEEK_BASE_URL") or None,
         )
     )
     try:
         result = await adapter.run_turn(
             "smoke-test", "Reply with exactly one word: pong"
         )
-        assert result.text.strip()
-        assert result.finish_reason == "completed"
+        assert result.finish_reason == "completed", (
+            f"finish_reason={result.finish_reason!r} error={result.error!r}"
+        )
+        assert result.text.strip(), f"empty reply; error={result.error!r}"
     finally:
         await adapter.close()

@@ -122,7 +122,13 @@ def _apply_env(settings: Settings) -> None:
         settings.feishu_allowed_chat_ids = _split_csv(env["FEISHU_ALLOWED_CHAT_IDS"])
 
     settings.deepseek_api_key = env.get("DEEPSEEK_API_KEY", settings.deepseek_api_key)
-    settings.deepseek_base_url = env.get("DEEPSEEK_BASE_URL", settings.deepseek_base_url)
+    # `or` on purpose, not `.get(key, default)`: an env referencing an
+    # unconfigured secret (e.g. GitHub Actions `${{ secrets.X }}` for a secret
+    # that was never created) sets the var to "" rather than omitting it. An
+    # empty base_url breaks the dsh runtime's request construction outright —
+    # reproduced locally against CI run 31948093525 — so "set but empty" must
+    # be treated the same as "unset", not as an explicit override.
+    settings.deepseek_base_url = env.get("DEEPSEEK_BASE_URL") or settings.deepseek_base_url
     settings.dsh_provider = env.get("DSH_PROVIDER", settings.dsh_provider)
     settings.dsh_model = env.get("DSH_MODEL", settings.dsh_model)
     if "DSH_MAX_TOKENS" in env:

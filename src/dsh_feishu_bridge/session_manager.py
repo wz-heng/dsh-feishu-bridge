@@ -146,12 +146,11 @@ class SessionManager:
                     session.id, {"type": "assistant_text", "content": result.text}
                 )
             if is_error and not result.text:
+                message = f"Turn ended without a reply (reason: {result.finish_reason})."
+                if result.error:
+                    message = f"{message} {result.error}"
                 await self._broadcast(
-                    session.id,
-                    {
-                        "type": "error",
-                        "message": f"Turn ended without a reply (reason: {result.finish_reason}).",
-                    },
+                    session.id, {"type": "error", "message": message}
                 )
             session.status = SessionStatus.ERROR if is_error else SessionStatus.IDLE
             await self._broadcast(

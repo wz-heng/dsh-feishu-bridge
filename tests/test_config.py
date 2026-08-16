@@ -46,6 +46,12 @@ def test_env_vars_applied(clean_env):
     assert s.port == 9999
 
 
+def test_empty_deepseek_base_url_env_is_treated_as_unset(clean_env):
+    clean_env.setenv("DEEPSEEK_BASE_URL", "")
+    s = load_settings()
+    assert s.deepseek_base_url is None
+
+
 def test_missing_config_file_raises(clean_env, tmp_path):
     with pytest.raises(ConfigError):
         load_settings(tmp_path / "nope.yaml")

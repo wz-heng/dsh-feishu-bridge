@@ -85,8 +85,26 @@ jobs:
       # cleanly — with a "not set" reason, not a failure — when
       # DEEPSEEK_API_KEY is absent. Re-implementing that gate as a
       # workflow-level `if:` would just be a second copy to keep in sync.
+      #
+      # DEEPSEEK_BASE_URL is exported conditionally, NOT via a plain `env:`
+      # entry — root-caused against CI run 31948093525: an `env:` entry
+      # referencing a secret that was never configured
+      # (`${{ secrets.DEEPSEEK_BASE_URL }}` with no such repo secret set)
+      # still sets the variable to an empty string rather than omitting it.
+      # deepseek-harness-sdk's runtime subprocess inherits the full parent
+      # environment by design (python/sdk/README.md), and it treats a
+      # present-but-empty DEEPSEEK_BASE_URL as an explicit override rather
+      # than "unset" — so every real API call failed in ~2s with a
+      # TRANSPORT error ("DeepSeek API request to  failed"), reproduced
+      # locally the same way. Only exporting the var when the secret is
+      # actually non-empty keeps it genuinely absent from pytest's
+      # environment (and thus the runtime subprocess's) otherwise.
       - name: Real-SDK smoke (skips cleanly if DEEPSEEK_API_KEY isn't set)
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
-        run: pytest -m real_sdk -v
+          DEEPSEEK_BASE_URL_SECRET: ${{ secrets.DEEPSEEK_BASE_URL }}
+        run: |
+          if [ -n "$DEEPSEEK_BASE_URL_SECRET" ]; then
+            export DEEPSEEK_BASE_URL="$DEEPSEEK_BASE_URL_SECRET"
+          fi
+          pytest -m real_sdk -v
