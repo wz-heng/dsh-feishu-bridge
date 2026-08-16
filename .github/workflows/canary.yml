@@ -1,0 +1,92 @@
+name: SDK canary
+
+# Deliberately schedule/dispatch only — never pull_request or
+# pull_request_target. This job installs the LATEST deepseek-harness-sdk /
+# deepseek-harness-runtime-bin / lark-channel-sdk (unpinned) and, when the
+# DEEPSEEK_API_KEY secret is configured, spends real API quota on a live
+# smoke turn. Both only ever run in a trusted (default-branch / manual)
+# context, so a fork PR can never ride this trigger to exfiltrate the
+# secret — GitHub's default fork-PR secret redaction is a second layer, not
+# the only one.
+on:
+  schedule:
+    - cron: "37 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sdk-canary
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    name: latest-SDK smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install Python deps (pinned baseline)
+        run: pip install -e ".[dev]"
+
+      # pyproject.toml keeps its exact pins untouched (that's a deliberate,
+      # separately-reviewed decision — see pyproject.toml's dependency
+      # comment). This step only reaches into the venv and swaps the two
+      # SDKs for whatever is newest on PyPI right now. Both
+      # deepseek-harness-sdk and deepseek-harness-runtime-bin only ever
+      # publish pre-releases (0.1.x developer preview), so --pre is required
+      # or `pip install --upgrade` finds nothing to upgrade to.
+      - name: Upgrade to latest deepseek-harness SDK + runtime
+        run: pip install --pre --upgrade deepseek-harness-sdk deepseek-harness-runtime-bin
+
+      - name: Upgrade to latest lark-channel-sdk
+        run: pip install --upgrade lark-channel-sdk
+
+      - name: Record installed SDK versions
+        run: |
+          {
+            echo "### SDK canary — installed versions"
+            echo
+            echo "| package | version |"
+            echo "|---|---|"
+            echo "| deepseek-harness-sdk | $(pip show deepseek-harness-sdk | awk -F': ' '/^Version/{print $2}') |"
+            echo "| deepseek-harness-runtime-bin | $(pip show deepseek-harness-runtime-bin | awk -F': ' '/^Version/{print $2}') |"
+            echo "| lark-channel-sdk | $(pip show lark-channel-sdk | awk -F': ' '/^Version/{print $2}') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Full fake suite against the freshly-upgraded SDKs. Most of it never
+      # touches deepseek_harness (FakeDshBackend substitutes it), but
+      # tests/test_dsh_adapter_real_construction.py specifically constructs
+      # the real DeepSeekHarness/DeepSeekHarnessConfig classes — that's the
+      # signature-drift tripwire that doesn't need an API key. The Feishu
+      # side already builds a real FeishuChannel against a local fake server
+      # in tests/test_bridge_feishu.py, so lark-channel-sdk gets equivalent
+      # real-construction + real-protocol coverage for free.
+      - name: pytest (fake suite, now against latest SDKs)
+        run: pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: node --test (dsh-plugin shell)
+        run: npm test
+
+      # Unconditional on purpose: this repo's own pytest.ini marker (see
+      # pyproject.toml / tests/test_real_sdk_smoke.py) already skips
+      # cleanly — with a "not set" reason, not a failure — when
+      # DEEPSEEK_API_KEY is absent. Re-implementing that gate as a
+      # workflow-level `if:` would just be a second copy to keep in sync.
+      - name: Real-SDK smoke (skips cleanly if DEEPSEEK_API_KEY isn't set)
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          DEEPSEEK_BASE_URL: ${{ secrets.DEEPSEEK_BASE_URL }}
+        run: pytest -m real_sdk -v

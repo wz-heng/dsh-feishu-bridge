@@ -2,6 +2,11 @@
 
 English | [中文](README.zh.md)
 
+[![CI](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/ci.yml)
+[![SDK canary](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/canary.yml/badge.svg)](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/canary.yml)
+
+The SDK canary runs daily against the *latest* `deepseek-harness-sdk` and `lark-channel-sdk` releases (not the pinned versions this repo ships), so a breaking upstream change gets caught within a day instead of silently bit-rotting.
+
 A Feishu (Lark) channel bridge for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (`dsh`): message a Feishu bot, it runs a `dsh` agent turn, the reply comes back to the chat.
 
 **This is an independent community project. It is not built, maintained, or endorsed by DeepSeek.** It drives `dsh` entirely through its public Python SDK (`deepseek-harness-sdk`) — a subprocess boundary, no forked/patched harness code.

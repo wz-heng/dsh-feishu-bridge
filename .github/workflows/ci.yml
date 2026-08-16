@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: pytest + node --test (pinned SDKs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # Exact versions from pyproject.toml — this is the "we didn't break
+      # anything against the SDK version we actually ship on" gate. The
+      # daily canary (canary.yml) covers the latest-SDK case separately.
+      - name: Install Python deps (pinned)
+        run: pip install -e ".[dev]"
+
+      - name: pytest (fake suite; real_sdk excluded by pyproject default addopts)
+        run: pytest -q
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: node --test (dsh-plugin shell)
+        run: npm test

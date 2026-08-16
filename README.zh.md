@@ -2,6 +2,11 @@
 
 [English](README.md) | 中文
 
+[![CI](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/ci.yml)
+[![SDK canary](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/canary.yml/badge.svg)](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/canary.yml)
+
+SDK 金丝雀每天对 `deepseek-harness-sdk`、`lark-channel-sdk` 的**最新**版本（而非本仓库锁定的版本）跑一遍全套测试，上游一旦引入破坏性变更，一天内就能发现，而不是悄悄失修。
+
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的飞书（Lark）channel 桥：给飞书机器人发消息，触发一次 `dsh` agent turn，回复自动发回该聊天。
 
 **这是一个独立的社区项目，不由 DeepSeek 官方构建、维护或背书。** 它完全通过 `dsh` 的公开 Python SDK（`deepseek-harness-sdk`）驱动——子进程边界，没有 fork/patch harness 本身的代码。
