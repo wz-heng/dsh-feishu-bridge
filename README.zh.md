@@ -5,7 +5,7 @@
 [![CI](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/ci.yml)
 [![SDK canary](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/canary.yml/badge.svg)](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/canary.yml)
 
-SDK 金丝雀每天对 `deepseek-harness-sdk`、`lark-channel-sdk` 的**最新**版本（而非本仓库锁定的版本）跑一遍全套测试，上游一旦引入破坏性变更，一天内就能发现，而不是悄悄失修。
+SDK 金丝雀每天对 `deepseek-harness-sdk`、`lark-channel-sdk` 的**最新**版本（而非本仓库锁定的版本）跑一遍全套测试，上游一旦引入破坏性变更，一天内就能发现。
 
 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)（`dsh`）的飞书（Lark）channel 桥：给飞书机器人发消息，触发一次 `dsh` agent turn，回复自动发回该聊天。
 
@@ -13,7 +13,7 @@ SDK 金丝雀每天对 `deepseek-harness-sdk`、`lark-channel-sdk` 的**最新**
 
 ## 这是什么
 
-- 一套生产级飞书机器人桥（fail-closed 白名单、一次性卡片 nonce、per-chat 输出详略、sticky session、`ws`/`webhook` 双 transport），从另一个 agent harness 项目的成熟飞书桥移植而来，改接到 `dsh`。
+- 一套生产级飞书机器人桥：fail-closed 白名单、一次性卡片 nonce、per-chat 输出详略、sticky session、`ws`/`webhook` 双 transport。
 - 与 `deepseek-harness-sdk` 对话的薄适配层集中在一个文件 `src/dsh_feishu_bridge/dsh_adapter.py`，SDK 版本精确锁定——harness 目前是 v0.1 developer preview，版本间明示会有破坏性变更。
 
 ## 截图
@@ -151,18 +151,18 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 ## 安全姿态
 
 - **默认 fail-closed。** 不配置 `FEISHU_ALLOWED_OPEN_IDS` 意味着所有发送者都被拒绝——没有隐式的"允许所有人"。这是刻意设计：一个白名单为空的 agent 桥如果默认放行，会让租户里任何人都能触发任意 agent turn。
-- **webhook 模式必须同时配置 verification token 和 encrypt key。** 缺任一项，webhook 路由根本不会注册——进程宁可拒绝以半配置状态启动,也不会默默接受未经验证的事件。encrypt key 不是可选项：verification token 只是请求体里携带的一个静态值，不是逐请求的签名,单靠它无法证明请求真的来自飞书。
-- **每个 webhook 请求都在本 bridge 自己的边界上做签名、时间戳、重放校验**——校验先于任何下游 SDK 处理。`X-Lark-Signature` 会按 `sha256(timestamp + nonce + encrypt_key + body)` 校验；timestamp 必须落在距"现在"5 分钟的窗口内；同一个 `(timestamp, nonce)` 组合如果已经出现过，会被当作重放拒绝。任一校验失败都直接返回 `401`,请求不会到达消息处理逻辑。唯一刻意放行的例外是飞书控制台"保存请求网址"这一步的握手请求：此时订阅尚未确认，飞书根本不会为它签名，因此本 bridge 只校验 `FEISHU_VERIFICATION_TOKEN` 并直接回显 challenge——这与底层 SDK 原本就会做的那次(已强制要求的)校验完全等价。
+- **webhook 模式必须同时配置 verification token 和 encrypt key。** 缺任一项，webhook 路由根本不会注册——进程宁可拒绝以半配置状态启动，也不会默默接受未经验证的事件。encrypt key 不是可选项：verification token 只是请求体里携带的一个静态值，不是逐请求的签名，单靠它无法证明请求真的来自飞书。
+- **每个 webhook 请求都在本 bridge 自己的边界上做签名、时间戳、重放校验**——校验先于任何下游 SDK 处理。`X-Lark-Signature` 会按 `sha256(timestamp + nonce + encrypt_key + body)` 校验；timestamp 必须落在距"现在"5 分钟的窗口内；同一个 `(timestamp, nonce)` 组合如果已经出现过，会被当作重放拒绝。任一校验失败都直接返回 `401`，请求不会到达消息处理逻辑。唯一刻意放行的例外是飞书控制台"保存请求网址"这一步的握手请求：此时订阅尚未确认，飞书根本不会为它签名，因此本 bridge 只校验 `FEISHU_VERIFICATION_TOKEN` 并直接回显 challenge——这与底层 SDK 原本就会做的那次（已强制要求的）校验完全等价。
 - **卡片按钮（会话切换）使用一次性、绑定身份的 nonce。** nonce 铸造时精确绑定某个 action + session；二次点击、重放的 nonce、被篡改的卡片 value 都会被拒绝且不生效。
 - **会话归创建它的聊天所有。** `/sessions` 只列出（`/switch` 也只接受）发起请求的聊天自己拥有的会话——即便两个聊天都在白名单里，也不能列出或劫持另一个聊天的会话 id 来偷看它的回复。
-- 用这个 bridge 的进程时用composition 实际需要的最小权限运行。内置默认的 `dsh` composition（`examples/jsonrpc-agent` 上游）用的是 `danger-full-access` 的 bash + 文件编辑——请在一次性工作区/容器里跑，不要对着你在意的机器跑。
+- 请以 composition 实际需要的最小权限运行本 bridge 进程。内置默认的 `dsh` composition（`examples/jsonrpc-agent` 上游）用的是 `danger-full-access` 的 bash + 文件编辑——请在一次性工作区/容器里跑，不要对着你在意的机器跑。
 
 ## 限制（v1，刻意为之）
 
 这些是由 `deepseek-harness-sdk` v0.1 当前实际能力决定的范围收窄，在此明确写出而非静默缺失：
 
-- **不支持增量流式输出。** `DeepSeekHarness.run()` 是同步调用，阻塞到该 turn idle 才返回；SDK 的 `on_notification` 钩子能在调用过程中拿到原始协议 notification，但其事件 schema 不属于 v0.1 的既定文档契约。所以 bridge 在 turn 开始时发一条状态行，turn 结束后发完整回复——不是某些桥那种逐 token 流式。
-- **不支持工具审批流程。** 内置示例 `dsh` composition 跑 Bash/编辑器工具时没有交互式审批提示，SDK 的高层 `Session` API 也没有暴露"服务端发起审批请求"的钩子（即便未来某个 composition 加了这个能力，也只有底层 `HarnessClient.next_request()/respond()` 才能接住）。批准/拒绝卡片的机制已移植并有单测覆盖(接口对等)，但目前没有任何 session backend 会触发它。
+- **不支持增量流式输出。** `DeepSeekHarness.run()` 是同步调用，阻塞到该 turn idle 才返回；SDK 的 `on_notification` 钩子能在调用过程中拿到原始协议 notification，但其事件 schema 不属于 v0.1 的既定文档契约。所以 bridge 在 turn 开始时发一条状态行，turn 结束后发完整回复，不提供逐 token 的流式输出。
+- **不支持工具审批流程。** 内置示例 `dsh` composition 跑 Bash/编辑器工具时没有交互式审批提示，SDK 的高层 `Session` API 也没有暴露"服务端发起审批请求"的钩子（即便未来某个 composition 加了这个能力，也只有底层 `HarnessClient.next_request()/respond()` 才能接住）。批准/拒绝卡片的机制已实现并有单测覆盖（接口对等），但目前没有任何 session backend 会触发它。
 - **会话仅在单个 bridge 进程内 sticky。** 重启会起一个全新的 `DeepSeekHarness` 子进程；通过共享 `session_root` 跨重启恢复并不是 SDK v0.1 文档承诺的行为，所以本桥不会在其之上搭建未经证实的持久化。聊天的 sticky session 指针和它的 `/quiet`/`/verbose` 偏好都会在重启后重置。
 - **仅支持文本消息**——不支持语音/图片/文件附件，也不支持话题/子话题回复（一个聊天只有一个 sticky session，跨话题共享会悄悄串台）。
 - **每个 bridge 进程只有一份模型配置**——provider/model/cordis composition 是进程级的，不是按聊天区分的。没有 `/agent` 式的重新绑定命令；如果需要第二份配置，跑第二个 bridge 进程（不同端口、不同飞书 app 或白名单）。

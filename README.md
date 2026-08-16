@@ -13,7 +13,7 @@ A Feishu (Lark) channel bridge for [DeepSeek Harness](https://github.com/deepsee
 
 ## What this is
 
-- A production-grade Feishu bot bridge (fail-closed allowlist, one-time card nonces, per-chat verbosity, sticky sessions, both `ws` and `webhook` transports) ported from a mature bridge in another agent-harness project and adapted to drive `dsh` instead.
+- A production-grade Feishu bot bridge: fail-closed allowlist, one-time card nonces, per-chat verbosity, sticky sessions, both `ws` and `webhook` transports.
 - The thin adapter that talks to `deepseek-harness-sdk` lives in one file, `src/dsh_feishu_bridge/dsh_adapter.py`, and the SDK version is pinned exactly — the harness is a v0.1 developer preview that documents breaking changes between releases.
 
 ## Screenshots
@@ -161,8 +161,8 @@ Everything is an environment variable. An optional YAML file (path via `DSH_FEIS
 
 These are deliberate scope decisions driven by what `deepseek-harness-sdk` v0.1 actually exposes today — documented here rather than silently missing:
 
-- **No incremental streaming.** `DeepSeekHarness.run()` is a synchronous call that blocks until the turn is idle; the SDK's `on_notification` hook receives raw protocol notifications mid-call, but their event schema isn't part of the documented v0.1 contract. So the bridge posts one status line at turn start and the full reply once the turn completes — not a token-by-token stream like some other bridges.
-- **No tool-approval flow.** The bundled example `dsh` composition runs Bash/editor tools without an interactive approval prompt, and the SDK's high-level `Session` API has no hook to surface a server-initiated approval request even if a future composition added one (only the low-level `HarnessClient.next_request()/respond()` does). The approve/deny card machinery is ported and unit-tested for interface parity, but no session backend triggers it today.
+- **No incremental streaming.** `DeepSeekHarness.run()` is a synchronous call that blocks until the turn is idle; the SDK's `on_notification` hook receives raw protocol notifications mid-call, but their event schema isn't part of the documented v0.1 contract. So the bridge posts one status line at turn start and the full reply once the turn completes — not a token-by-token stream.
+- **No tool-approval flow.** The bundled example `dsh` composition runs Bash/editor tools without an interactive approval prompt, and the SDK's high-level `Session` API has no hook to surface a server-initiated approval request even if a future composition added one (only the low-level `HarnessClient.next_request()/respond()` does). The approve/deny card machinery is implemented and unit-tested for interface parity, but no session backend triggers it today.
 - **Sessions are sticky only within one bridge process.** A restart starts a fresh `DeepSeekHarness` subprocess, and cross-restart resume via a shared `session_root` isn't a behavior the SDK's v0.1 docs commit to — so this bridge doesn't build undocumented persistence on top of it. A chat's sticky session pointer and its `/quiet`/`/verbose` preference both reset on restart.
 - **Text messages only** — no voice, image, or file attachments, and no topic/thread replies (one sticky session per chat would silently cross wires across threads).
 - **One model configuration per bridge process** — provider/model/cordis composition are subprocess-wide, not per-chat. There's no `/agent`-style rebind command; run a second bridge process (different port, different Feishu app or allowlist) if you need a second configuration.
