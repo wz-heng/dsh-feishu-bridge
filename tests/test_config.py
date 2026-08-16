@@ -13,6 +13,7 @@ def clean_env(monkeypatch):
         "FEISHU_ALLOWED_OPEN_IDS", "FEISHU_ALLOWED_CHAT_IDS",
         "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DSH_PROVIDER", "DSH_MODEL",
         "DSH_MAX_TOKENS", "DSH_CORDIS", "DSH_SESSION_ROOT", "DSH_WORKSPACE",
+        "DSH_APPROVAL_MODE", "DSH_APPROVAL_TIMEOUT_SECONDS",
         "DSH_FEISHU_BRIDGE_HOST", "DSH_FEISHU_BRIDGE_PORT",
         "DSH_FEISHU_BRIDGE_CONFIG",
     ]:
@@ -29,6 +30,8 @@ def test_defaults(clean_env):
     assert s.dsh_model == "deepseek-v4-flash"
     assert s.host == "0.0.0.0"
     assert s.port == 8788
+    assert s.dsh_approval_mode is False
+    assert s.dsh_approval_timeout_seconds == 60.0
 
 
 def test_env_vars_applied(clean_env):
@@ -88,3 +91,47 @@ def test_yaml_must_be_a_mapping(clean_env, tmp_path):
     config_file.write_text("- just\n- a\n- list\n")
     with pytest.raises(ConfigError):
         load_settings(config_file)
+
+
+class TestApprovalMode:
+    def test_env_vars_applied(self, clean_env):
+        clean_env.setenv("DSH_APPROVAL_MODE", "true")
+        clean_env.setenv("DSH_APPROVAL_TIMEOUT_SECONDS", "12.5")
+        s = load_settings()
+        assert s.dsh_approval_mode is True
+        assert s.dsh_approval_timeout_seconds == 12.5
+
+    @pytest.mark.parametrize("value", ["1", "true", "True", "yes", "on"])
+    def test_truthy_spellings(self, clean_env, value):
+        clean_env.setenv("DSH_APPROVAL_MODE", value)
+        assert load_settings().dsh_approval_mode is True
+
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", ""])
+    def test_falsy_spellings(self, clean_env, value):
+        clean_env.setenv("DSH_APPROVAL_MODE", value)
+        assert load_settings().dsh_approval_mode is False
+
+    def test_yaml_applied(self, clean_env, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("dsh:\n  approval_mode: true\n  approval_timeout_seconds: 30\n")
+        s = load_settings(config_file)
+        assert s.dsh_approval_mode is True
+        assert s.dsh_approval_timeout_seconds == 30.0
+
+    def test_yaml_quoted_false_string_is_not_truthy(self, clean_env, tmp_path):
+        # Snape nit: Python's bool("false") is True — a quoted YAML string
+        # must not silently turn approval mode ON.
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text('dsh:\n  approval_mode: "false"\n')
+        assert load_settings(config_file).dsh_approval_mode is False
+
+    def test_yaml_quoted_true_string_is_truthy(self, clean_env, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text('dsh:\n  approval_mode: "true"\n')
+        assert load_settings(config_file).dsh_approval_mode is True
+
+    def test_conflicts_with_custom_cordis(self, clean_env):
+        clean_env.setenv("DSH_APPROVAL_MODE", "1")
+        clean_env.setenv("DSH_CORDIS", "/some/custom/cordis.yml")
+        with pytest.raises(ConfigError, match="DSH_APPROVAL_MODE"):
+            load_settings()

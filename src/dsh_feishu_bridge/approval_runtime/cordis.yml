@@ -1,0 +1,72 @@
+# dsh-feishu-bridge approval-mode composition: the bundled default runtime
+# composition (deepseek_harness_runtime/runtime/cordis.yml, shipped inside
+# the deepseek-harness-runtime-bin wheel) plus a human-in-the-loop approval
+# gate for dangerous tool calls. See ../../../docs/architecture.md "Remote
+# tool approval" for the design and why this is a full replacement file, not
+# a patch — DSH_CORDIS_CONFIG replaces the whole composition; cordis's
+# hot-patch layer (watchUserPatches) is a different, OUTER-host-only feature
+# used by this repo's own top-level cordis.patch.yml, unrelated to the inner
+# runtime composition configured here.
+#
+# Every row down to (and not including) "approval" is copied verbatim from
+# the bundled default — keep the two in sync if that default ever changes
+# upstream (pyproject.toml pins deepseek-harness-runtime-bin to an exact
+# version specifically so this doesn't drift silently).
+
+- id: sdk-jsonrpc-server
+  name: '@deepseek-ai/dsh-sdk-jsonrpc-server'
+
+- id: agent-core
+  name: '@deepseek-ai/dsh-agent-spine-demo'
+  config:
+    workspaceContext:
+      maxBytes: 65536
+
+- id: llm-deepseek
+  name: '@deepseek-ai/dsh-llm-deepseek'
+
+- id: sessions
+  name: '@deepseek-ai/dsh-session-persistence-jsonl'
+  config:
+    root: !!js process.env.DSH_SESSION_ROOT ?? './.sessions'
+
+- id: session-checkpoints
+  name: '@deepseek-ai/dsh-session-checkpoint-policy'
+
+- id: subprocess
+  name: '@deepseek-ai/dsh-subprocess-local'
+
+# Deliberately still the UNCONFINED executor: the approval gate below does
+# not depend on sandbox confinement (see pre-execute-gate.mjs's module
+# docstring) and adding one would be an unrelated, unrequested policy layer.
+- id: bash
+  name: '@deepseek-ai/dsh-bash-local'
+  config:
+    cwd: !!js process.env.DSH_CWD ?? process.cwd()
+
+- id: fs-local
+  name: '@deepseek-ai/dsh-fs-local'
+  config:
+    cwd: !!js process.env.DSH_CWD ?? process.cwd()
+
+# --- approval mode additions ---
+
+# ApprovalService: fixed at policy 'ask'. Approval mode composed at all means
+# every gated tool call needs a decision — there is no live '/permission'
+# preset switching surface here (that's @deepseek-ai/dsh-permission-presets,
+# deliberately not composed; see pre-execute-gate.mjs).
+- id: approval
+  name: '@deepseek-ai/dsh-user-approval'
+  config:
+    policy: ask
+
+# Marks `bash` (see its own Config for the full gated-tools list) as needing
+# approval before every call.
+- id: approval-pre-execute-gate
+  name: ./pre-execute-gate.mjs
+
+# Answers the approval/request waterfall over a loopback HTTP callback into
+# this bridge's Python process ($DSH_APPROVAL_CALLBACK_URL,
+# $DSH_APPROVAL_TIMEOUT_MS — see approval_gateway.py).
+- id: approval-relay
+  name: ./approval-relay.mjs

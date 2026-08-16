@@ -124,6 +124,16 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 | `/verbose` | 同时显示状态/结果行 |
 | `/help` | 列出命令 |
 
+## 远程工具审批
+
+据我们所知，这是唯一带远程工具审批流程的 `dsh` 飞书桥——大多数桥只是聊天转发器，模型要什么就直接跑。
+
+设置 `DSH_APPROVAL_MODE=1` 开启后，agent 每次调用 `bash` 都会阻塞，直到有人在飞书上给会话属主聊天推送的卡片上点 **同意** 或 **拒绝**，并且**超时 fail-closed**（`DSH_APPROVAL_TIMEOUT_SECONDS`，默认 60 秒——卡片超时没人处理是拒绝，绝不会默认放行）。默认关闭，不影响现有部署。
+
+这个能力**不需要**（也不会组合）沙盒化的 bash 执行器——审批模式是对工具*执行*的人工核准闸门，和文件系统隔离是两回事。如果两者都要，按你原本不开审批模式时的做法把 `DSH_WORKSPACE` 指向一次性目录/容器即可（见下方"安全姿态"）。
+
+实现上：审批模式会换用一份内置的 Cordis composition（`src/dsh_feishu_bridge/approval_runtime/cordis.yml`），把 `bash` 调用标记为需要审批，并通过一条仅回环（loopback-only）的 HTTP 回调把决策转发回本 bridge——绝不经过公网的 webhook/健康检查端口，也不会被这台机器以外的任何人触达。完整设计、以及为什么这条路今天走不通 dsh SDK 自己的 JSON-RPC 通道，见 `docs/architecture.md` "Remote tool approval" 一节。
+
 ## 配置参考
 
 全部走环境变量。可选的 YAML 文件（路径通过 `DSH_FEISHU_BRIDGE_CONFIG` 或 `--config` 指定）可以配置非敏感项（白名单、model、provider）——见 `examples/config.example.yaml`。两者都设置时环境变量优先，凭据故意不从 YAML 文件读取。
@@ -135,9 +145,11 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 | `DSH_PROVIDER` | `deepseek-official` | Provider 路由（见 SDK 文档）。 |
 | `DSH_MODEL` | `deepseek-v4-flash` | 模型 id。 |
 | `DSH_MAX_TOKENS` | 未设置 | 可选的单请求输出上限。 |
-| `DSH_CORDIS` | 未设置 | 自定义 Cordis composition 路径；不填则用内置默认。 |
+| `DSH_CORDIS` | 未设置 | 自定义 Cordis composition 路径；不填则用内置默认。和 `DSH_APPROVAL_MODE` 互斥（该模式自带一份 composition——见"远程工具审批"）。 |
 | `DSH_SESSION_ROOT` | 未设置 | runtime 写 JSONL session 日志的目录。 |
 | `DSH_WORKSPACE` | 当前目录 | agent 工具操作的工作区。 |
+| `DSH_APPROVAL_MODE` | `0` | 设为 `1`/`true`/`yes`/`on` 要求每次 `bash` 调用前先在飞书上点 同意/拒绝——见"远程工具审批"。 |
+| `DSH_APPROVAL_TIMEOUT_SECONDS` | `60` | 一张待处理审批卡等待多久后自动拒绝（fail-closed）。 |
 | `FEISHU_APP_ID` / `FEISHU_APP_SECRET` | — | 必须同时配置，或都不配置。 |
 | `FEISHU_TRANSPORT` | `ws` | `ws`（无需公网 URL）或 `webhook`。 |
 | `FEISHU_VERIFICATION_TOKEN` | — | `FEISHU_TRANSPORT=webhook` 时必填。 |
@@ -153,16 +165,16 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 - **默认 fail-closed。** 不配置 `FEISHU_ALLOWED_OPEN_IDS` 意味着所有发送者都被拒绝——没有隐式的"允许所有人"。这是刻意设计：一个白名单为空的 agent 桥如果默认放行，会让租户里任何人都能触发任意 agent turn。
 - **webhook 模式必须同时配置 verification token 和 encrypt key。** 缺任一项，webhook 路由根本不会注册——进程宁可拒绝以半配置状态启动，也不会默默接受未经验证的事件。encrypt key 不是可选项：verification token 只是请求体里携带的一个静态值，不是逐请求的签名，单靠它无法证明请求真的来自飞书。
 - **每个 webhook 请求都在本 bridge 自己的边界上做签名、时间戳、重放校验**——校验先于任何下游 SDK 处理。`X-Lark-Signature` 会按 `sha256(timestamp + nonce + encrypt_key + body)` 校验；timestamp 必须落在距"现在"5 分钟的窗口内；同一个 `(timestamp, nonce)` 组合如果已经出现过，会被当作重放拒绝。任一校验失败都直接返回 `401`，请求不会到达消息处理逻辑。唯一刻意放行的例外是飞书控制台"保存请求网址"这一步的握手请求：此时订阅尚未确认，飞书根本不会为它签名，因此本 bridge 只校验 `FEISHU_VERIFICATION_TOKEN` 并直接回显 challenge——这与底层 SDK 原本就会做的那次（已强制要求的）校验完全等价。
-- **卡片按钮（会话切换）使用一次性、绑定身份的 nonce。** nonce 铸造时精确绑定某个 action + session；二次点击、重放的 nonce、被篡改的卡片 value 都会被拒绝且不生效。
-- **会话归创建它的聊天所有。** `/sessions` 只列出（`/switch` 也只接受）发起请求的聊天自己拥有的会话——即便两个聊天都在白名单里，也不能列出或劫持另一个聊天的会话 id 来偷看它的回复。
-- 请以 composition 实际需要的最小权限运行本 bridge 进程。内置默认的 `dsh` composition（`examples/jsonrpc-agent` 上游）用的是 `danger-full-access` 的 bash + 文件编辑——请在一次性工作区/容器里跑，不要对着你在意的机器跑。
+- **卡片按钮（会话切换、工具审批）使用一次性、绑定身份的 nonce。** nonce 铸造时精确绑定某个 action + session（审批卡片还额外绑定具体的工具调用）；二次点击、重放的 nonce、被篡改的卡片 value 都会被拒绝且不生效。
+- **会话归创建它的聊天所有。** `/sessions` 只列出（`/switch` 也只接受）发起请求的聊天自己拥有的会话——即便两个聊天都在白名单里，也不能列出或劫持另一个聊天的会话 id 来偷看它的回复。工具审批的决策同样在服务端做这一层归属校验，不是只靠 nonce 的作用域。
+- **审批模式的回调服务器只监听回环地址。** 它绑定 `127.0.0.1` 上一个独立的临时端口，和对外的 webhook/健康检查端口分开；这个地址只会写进 harness 子进程自己的环境变量，不会暴露给任何远端能触达的地方。
+- 请以 composition 实际需要的最小权限运行本 bridge 进程。内置默认的 `dsh` composition（`examples/jsonrpc-agent` 上游）用的是 `danger-full-access` 的 bash——请在一次性工作区/容器里跑，不要对着你在意的机器跑——不论是否同时开启审批模式（这是两个互相独立的控制手段，见"远程工具审批"）。
 
 ## 限制（v1，刻意为之）
 
 这些是由 `deepseek-harness-sdk` v0.1 当前实际能力决定的范围收窄，在此明确写出而非静默缺失：
 
-- **不支持增量流式输出。** `DeepSeekHarness.run()` 是同步调用，阻塞到该 turn idle 才返回；SDK 的 `on_notification` 钩子能在调用过程中拿到原始协议 notification，但其事件 schema 不属于 v0.1 的既定文档契约。所以 bridge 在 turn 开始时发一条状态行，turn 结束后发完整回复，不提供逐 token 的流式输出。
-- **不支持工具审批流程。** 内置示例 `dsh` composition 跑 Bash/编辑器工具时没有交互式审批提示，SDK 的高层 `Session` API 也没有暴露"服务端发起审批请求"的钩子（即便未来某个 composition 加了这个能力，也只有底层 `HarnessClient.next_request()/respond()` 才能接住）。批准/拒绝卡片的机制已实现并有单测覆盖（接口对等），但目前没有任何 session backend 会触发它。
+- **不支持增量流式输出。** `DeepSeekHarness.run()` 是同步调用，阻塞到该 turn idle 才返回；SDK 的 `on_notification` 钩子能在调用过程中拿到原始协议 notification，但其事件 schema 不属于 v0.1 的既定文档契约。所以 bridge 在 turn 开始时发一条状态行，turn 结束后发完整回复——不是某些桥那种逐 token 流式。
 - **会话仅在单个 bridge 进程内 sticky。** 重启会起一个全新的 `DeepSeekHarness` 子进程；通过共享 `session_root` 跨重启恢复并不是 SDK v0.1 文档承诺的行为，所以本桥不会在其之上搭建未经证实的持久化。聊天的 sticky session 指针和它的 `/quiet`/`/verbose` 偏好都会在重启后重置。
 - **仅支持文本消息**——不支持语音/图片/文件附件，也不支持话题/子话题回复（一个聊天只有一个 sticky session，跨话题共享会悄悄串台）。
 - **每个 bridge 进程只有一份模型配置**——provider/model/cordis composition 是进程级的，不是按聊天区分的。没有 `/agent` 式的重新绑定命令；如果需要第二份配置，跑第二个 bridge 进程（不同端口、不同飞书 app 或白名单）。

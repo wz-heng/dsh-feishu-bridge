@@ -753,10 +753,12 @@ class TestCardActions:
         b.manager.switch_session.assert_not_awaited()
 
     async def test_approval_applied_false_settles_as_no_longer_pending(self):
-        # Exercises the "record.kind == approval" path end to end with the
-        # real BridgeManager.handle_tool_decision stub (always False, since
-        # dsh v1 has no approval flow) instead of a mock — the card should
-        # still settle without raising.
+        # Exercises the "record.kind == approval" path end to end with a
+        # real BridgeManager.handle_tool_decision (always False here since
+        # this manager has no ApprovalGateway configured — approval mode
+        # off) instead of a mock — the card should still settle without
+        # raising. See test_bridge_manager.py's TestToolDecisionWithApprovalGateway
+        # for the gateway-configured case.
         from dsh_feishu_bridge.bridges.manager import BridgeManager
         from dsh_feishu_bridge.session_manager import SessionManager
 

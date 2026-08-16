@@ -15,11 +15,20 @@ python-sdk.md @ deepseek-ai/deepseek-harness master, verified 2026-08-14):
   it returns only once that turn's session goes idle. There is no
   token-level streaming callback in the public contract — ``on_notification``
   receives raw protocol notifications while the call blocks, but their event
-  schema isn't documented for v0.1 and the high-level ``Session`` wrapper
-  doesn't surface server-initiated requests (e.g. a hypothetical approval
-  prompt) at all, only the low-level ``HarnessClient`` does. So this adapter
-  does not attempt to reconstruct incremental assistant text — it posts one
-  reply per turn, once the blocking call returns. See README "Limitations".
+  schema isn't documented for v0.1. So this adapter does not attempt to
+  reconstruct incremental assistant text — it posts one reply per turn, once
+  the blocking call returns. See README "Limitations".
+- Tool approval (``docs/architecture.md`` "Remote tool approval") needed NO
+  change here: the runtime's own ``@deepseek-ai/dsh-sdk-jsonrpc-server``
+  plugin never sends a server-initiated request over this SDK's stdio
+  channel (confirmed by reading its compiled source — its ``handleRequest``
+  only recognizes ``initialize``/``session/prompt``/``shutdown``), so a
+  pending approval never surfaces through ``HarnessClient``, the high-level
+  ``Session`` API, or this blocking ``run()`` call at all. It's relayed
+  entirely by a Node cordis plugin composed alongside the SDK server
+  (``approval_runtime/``) over an independent loopback HTTP side channel to
+  ``ApprovalGateway`` — orthogonal to the turn this call is blocked on,
+  which just runs a little longer while a human decides.
 - Multiple sessions can run concurrently against the SAME subprocess: the
   wire protocol filters notifications by session id. So the bridge process
   holds exactly one ``DeepSeekHarness`` and gives each chat its own session

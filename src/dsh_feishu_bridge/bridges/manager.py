@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from ..approval_gateway import ApprovalGateway
     from ..session_manager import SessionManager
 
 from .base import QUIET_SUPPRESSED_EVENTS, Bridge
@@ -52,8 +53,13 @@ class BridgeManager:
     # button lists are bounded; older sessions stay reachable via /switch <id>.
     SESSION_LIST_LIMIT = 30
 
-    def __init__(self, session_mgr: "SessionManager") -> None:
+    def __init__(
+        self,
+        session_mgr: "SessionManager",
+        approval_gateway: "ApprovalGateway | None" = None,
+    ) -> None:
         self.session_mgr = session_mgr
+        self._approval_gateway = approval_gateway
         self._bridges: dict[str, Bridge] = {}
         # "platform:chat_id" -> ChatBinding
         self._mappings: dict[str, ChatBinding] = {}
@@ -159,12 +165,23 @@ class BridgeManager:
         tool_use_id: str,
         approved: bool,
     ) -> bool:
-        """Always False: dsh v1 has no tool-approval flow (dsh_adapter.py
-        module docstring) so there is never a pending approval to settle.
-        Exists only so FeishuBridge's ported approval-card code path (kept
-        for interface parity, currently dormant) has something to call
-        instead of raising AttributeError if it's ever exercised."""
-        return False
+        """Settle a pending tool-approval decision from a card tap.
+
+        Returns False (and settles nothing) when: no ``ApprovalGateway`` is
+        configured for this manager (approval mode off — the default, see
+        ``docs/architecture.md`` "Remote tool approval"); the session is
+        unknown; the session isn't owned by THIS (platform, chat_id) — the
+        nonce alone already scopes a card to the chat it was sent to, but
+        this is the same server-side ownership check ``switch_session``
+        applies, not just card-plumbing; or the gateway reports nothing was
+        pending (stale/duplicate tap, or its own timeout already denied it).
+        """
+        if self._approval_gateway is None:
+            return False
+        session = self.session_mgr.get_session(session_id)
+        if session is None or session.owner != self._mapping_key(platform, chat_id):
+            return False
+        return self._approval_gateway.resolve(session_id, tool_use_id, approved)
 
     # --- Broadcast handler ---
 

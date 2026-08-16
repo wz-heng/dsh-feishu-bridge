@@ -132,14 +132,13 @@ class Bridge(ABC):
     ) -> None:
         """Send a tool approval request with approve/deny buttons.
 
-        Kept for interface parity with the source bridge this was ported
-        from, and exercised directly by the test suite. The bundled DSH v0.1
-        example composition (danger-full-access bash + editor) never raises
-        an approval-required tool call, and the high-level ``Session.run()``
-        SDK wrapper this backend uses has no hook to surface one even if a
-        future composition did — see README "Limitations". So in practice
-        this path is dormant until a session backend actually emits a
-        ``tool_approval_request`` event.
+        Live in approval mode (``DSH_APPROVAL_MODE=1`` — see
+        ``docs/architecture.md`` "Remote tool approval"): ``ApprovalGateway``
+        publishes a ``tool_approval_request`` broadcast for every gated tool
+        call, which reaches this method through the normal
+        ``handle_event`` dispatch below. Dormant otherwise — the default
+        composition never raises an approval-required tool call, so nothing
+        ever emits that event.
         """
 
     @abstractmethod

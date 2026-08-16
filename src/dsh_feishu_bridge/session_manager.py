@@ -2,9 +2,16 @@
 
 This plays the role the upstream bridge's ``SessionManager`` plays there, but
 scoped to what one dsh backend actually offers (see dsh_adapter.py module
-docstring): no multi-agent registry, no mid-turn incremental streaming, no
-tool-approval flow. One session == one dsh conversation, addressed by the
-same id on both sides.
+docstring): no multi-agent registry, no mid-turn incremental streaming. One
+session == one dsh conversation, addressed by the same id on both sides.
+
+Tool approval (``docs/architecture.md`` "Remote tool approval") runs
+alongside this, not through it: it's driven by ``ApprovalGateway`` over a
+loopback HTTP side channel to the harness subprocess, independent of the
+``run_turn``/notification flow below. ``notify_tool_approval_request`` is
+the one seam this module exposes for it — a thin wrapper over the same
+``_broadcast`` every turn event already goes through, so
+``Bridge.handle_event`` needs no changes to show an approval card.
 """
 
 from __future__ import annotations
@@ -103,6 +110,25 @@ class SessionManager:
                 await handler(event)
             except Exception:
                 logger.exception("Broadcast listener %s failed", key)
+
+    async def notify_tool_approval_request(
+        self, session_id: str, tool_use_id: str, tool_name: str, tool_input: dict[str, Any]
+    ) -> None:
+        """Publish a pending tool-approval request to every chat bound to
+        this session (in practice, its owner — see BridgeManager). Routes
+        through the same broadcast fan-out as turn events, so it reaches
+        ``Bridge.handle_event``'s existing ``tool_approval_request`` case
+        unchanged. Called by ``ApprovalGateway``, not by turn orchestration
+        below — see this module's docstring."""
+        await self._broadcast(
+            session_id,
+            {
+                "type": "tool_approval_request",
+                "tool_use_id": tool_use_id,
+                "tool_name": tool_name,
+                "tool_input": tool_input,
+            },
+        )
 
     # --- turns ---
 
