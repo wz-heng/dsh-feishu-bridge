@@ -13,6 +13,8 @@
 
 ## 截图
 
+![飞书里的真实一轮：agent 读取工作目录并概括文件](docs/screenshots/chat-agent-turn.png)
+
 ![默认 fail-closed：启动、拒绝、加白、回复](docs/screenshots/fail-closed-boot.png)
 
 ![以 dsh 插件方式安装](docs/screenshots/dsh-plugin-add.png)

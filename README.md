@@ -13,6 +13,8 @@ A Feishu (Lark) channel bridge for [DeepSeek Harness](https://github.com/deepsee
 
 ## Screenshots
 
+![A real turn in Feishu: the agent reads the workspace and summarizes a file](docs/screenshots/chat-agent-turn.png)
+
 ![Fail-closed by default: boot, reject, allowlist, reply](docs/screenshots/fail-closed-boot.png)
 
 ![Install as a dsh plugin](docs/screenshots/dsh-plugin-add.png)
