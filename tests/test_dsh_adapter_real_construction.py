@@ -24,10 +24,22 @@ from deepseek_harness import DeepSeekHarness, DeepSeekHarnessConfig
 from dsh_feishu_bridge.dsh_adapter import DshAdapterConfig
 
 
-def test_real_harness_constructs_from_adapter_config_fields():
+def test_real_harness_constructs_from_adapter_config_fields(monkeypatch):
     """Mirrors the exact field mapping DshAdapter._ensure_started performs,
     against the real SDK class instead of the stub test_dsh_adapter.py
     substitutes it with."""
+
+    def _fail_if_spawned(*_args, **_kwargs):
+        raise AssertionError(
+            "constructing DeepSeekHarness must not spawn the runtime subprocess"
+        )
+
+    # Guards the "construction never starts the runtime" invariant without
+    # pinning the test to an SDK-private attribute name (e.g. HarnessClient's
+    # own ``_proc`` field) — a rename there shouldn't turn the canary red,
+    # only an actual eager-spawn behavior change should.
+    monkeypatch.setattr("subprocess.Popen", _fail_if_spawned)
+
     adapter_config = DshAdapterConfig(
         provider="deepseek-official",
         model="deepseek-v4-flash",
@@ -58,8 +70,3 @@ def test_real_harness_constructs_from_adapter_config_fields():
 
     assert harness.config.provider == "deepseek-official"
     assert harness.config.model == "deepseek-v4-flash"
-    # Constructing must never start the runtime subprocess — asserting the
-    # negative keeps that invariant covered instead of leaving it as an
-    # unchecked comment (see module docstring).
-    assert harness._initialized is False
-    assert harness.client._proc is None
