@@ -35,6 +35,20 @@ def _parse_bool(value: str) -> bool:
     return value.strip().lower() in _TRUE_VALUES
 
 
+def _coerce_bool(value: Any, default: bool) -> bool:
+    """A YAML mapping value for a boolean field, coerced the same way env
+    vars are. A bare ``true``/``false`` YAML scalar already parses to a
+    native bool via ``yaml.safe_load`` — pass it through. A *quoted* string
+    (``approval_mode: "false"``) does not, and Python's own ``bool("false")``
+    is True — the exact footgun this exists to close, since getting this
+    wrong silently turns approval mode ON rather than off (Snape review)."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return _parse_bool(value)
+    return default
+
+
 @dataclass(slots=True)
 class Settings:
     # Feishu
@@ -130,7 +144,9 @@ def _apply_yaml(settings: Settings, data: dict[str, Any]) -> None:
     settings.dsh_cordis = dsh.get("cordis", settings.dsh_cordis)
     settings.dsh_session_root = dsh.get("session_root", settings.dsh_session_root)
     settings.dsh_workspace = dsh.get("workspace", settings.dsh_workspace)
-    settings.dsh_approval_mode = bool(dsh.get("approval_mode", settings.dsh_approval_mode))
+    settings.dsh_approval_mode = _coerce_bool(
+        dsh.get("approval_mode", settings.dsh_approval_mode), settings.dsh_approval_mode
+    )
     settings.dsh_approval_timeout_seconds = float(
         dsh.get("approval_timeout_seconds", settings.dsh_approval_timeout_seconds)
     )

@@ -50,11 +50,15 @@ async def _make_adapter(tmp_path, gateway: ApprovalGateway) -> DshAdapter:
     )
 
 
-async def test_approved_bash_call_completes_the_turn(tmp_path):
-    calls: list[tuple[str, str, str, dict]] = []
+async def test_approved_bash_call_actually_executes(tmp_path):
+    """Auto-approve on notify() and prove the command RAN via a sentinel
+    file — not by reading the model's own prose about what happened (Snape
+    review: the original version of this test never resolved the pending
+    approval at all, so it only ever exercised the timeout/deny path)."""
+    sentinel = tmp_path / "allow-sentinel"
 
     async def notify(session_id, tool_use_id, tool_name, tool_input):
-        calls.append((session_id, tool_use_id, tool_name, tool_input))
+        gateway.resolve(session_id, tool_use_id, True)
 
     gateway = ApprovalGateway(
         notify=notify, session_exists=lambda _sid: True, timeout_seconds=60.0
@@ -63,22 +67,22 @@ async def test_approved_bash_call_completes_the_turn(tmp_path):
     try:
         result = await adapter.run_turn(
             "approval-smoke-allow",
-            "Use your bash tool to run exactly: echo approval-smoke-ok. "
+            f"Use your bash tool to run exactly: touch {sentinel.name}. "
             "Then reply with exactly one word: done.",
         )
-        assert calls, "expected the bash tool call to raise a tool_approval_request"
-        assert calls[0][2] == "bash"
         assert result.finish_reason == "completed", (
             f"finish_reason={result.finish_reason!r} error={result.error!r}"
         )
+        assert sentinel.exists(), "approved bash call should have created the sentinel file"
     finally:
         await adapter.close()
         await gateway.stop()
 
 
-async def test_denied_bash_call_does_not_execute(tmp_path):
+async def test_denied_bash_call_never_executes(tmp_path):
     """No auto-approve wired in — the gateway's own timeout denies the call,
-    so the model must see a denial rather than command output."""
+    so the sentinel file the command would have created must NOT exist."""
+    sentinel = tmp_path / "deny-sentinel"
     gateway = ApprovalGateway(
         notify=_noop_notify, session_exists=lambda _sid: True, timeout_seconds=2.0
     )
@@ -86,13 +90,13 @@ async def test_denied_bash_call_does_not_execute(tmp_path):
     try:
         result = await adapter.run_turn(
             "approval-smoke-deny",
-            "Use your bash tool to run exactly: echo approval-smoke-should-not-run. "
+            f"Use your bash tool to run exactly: touch {sentinel.name}. "
             "Then tell me in one sentence whether the command ran or was denied.",
         )
         assert result.finish_reason == "completed", (
             f"finish_reason={result.finish_reason!r} error={result.error!r}"
         )
-        assert "approval-smoke-should-not-run" not in result.text
+        assert not sentinel.exists(), "denied bash call must never have executed"
     finally:
         await adapter.close()
         await gateway.stop()

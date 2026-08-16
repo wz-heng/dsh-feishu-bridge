@@ -118,6 +118,18 @@ class TestApprovalMode:
         assert s.dsh_approval_mode is True
         assert s.dsh_approval_timeout_seconds == 30.0
 
+    def test_yaml_quoted_false_string_is_not_truthy(self, clean_env, tmp_path):
+        # Snape nit: Python's bool("false") is True — a quoted YAML string
+        # must not silently turn approval mode ON.
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text('dsh:\n  approval_mode: "false"\n')
+        assert load_settings(config_file).dsh_approval_mode is False
+
+    def test_yaml_quoted_true_string_is_truthy(self, clean_env, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text('dsh:\n  approval_mode: "true"\n')
+        assert load_settings(config_file).dsh_approval_mode is True
+
     def test_conflicts_with_custom_cordis(self, clean_env):
         clean_env.setenv("DSH_APPROVAL_MODE", "1")
         clean_env.setenv("DSH_CORDIS", "/some/custom/cordis.yml")
