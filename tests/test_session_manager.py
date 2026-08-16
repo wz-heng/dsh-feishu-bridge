@@ -119,6 +119,26 @@ class TestTurns:
         assert "reason: error" in events[1]["message"]
         assert "TRANSPORT: DeepSeek API request to  failed" in events[1]["message"]
 
+    async def test_error_detail_broadcast_even_when_partial_text_present(
+        self, mgr: SessionManager, backend: FakeDshBackend, events: list[dict]
+    ):
+        # Snape review round 1: a turn ending in error can still carry
+        # partial text (the model said something before the runtime reported
+        # turn/end error) — result.error must not get silently dropped
+        # behind the assistant_text broadcast.
+        backend.reply = "partial output"
+        backend.finish_reason = "error"
+        backend.error = "TRANSPORT: DeepSeek API request to  failed"
+        session = await mgr.create_session()
+        await mgr.start_message(session.id, "hello")
+        await _drain(mgr)
+
+        types = [e["type"] for e in events]
+        assert types == ["status", "assistant_text", "error", "result", "status"]
+        assert events[1]["content"] == "partial output"
+        assert events[2]["message"] == "TRANSPORT: DeepSeek API request to  failed"
+        assert events[3]["is_error"] is True
+
     async def test_second_turn_increments_message_count(
         self, mgr: SessionManager, backend: FakeDshBackend
     ):

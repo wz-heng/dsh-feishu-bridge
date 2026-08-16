@@ -123,6 +123,41 @@ async def test_run_turn_extracts_error_detail_from_turn_end_event():
     assert result.error == "TRANSPORT: DeepSeek API request to  failed"
 
 
+async def test_run_turn_error_detail_falls_back_to_str_for_unknown_shapes():
+    # Snape review round 1: a well-shaped {code, message} dict isn't the only
+    # possible shape data.reason.error could take — nothing in the SDK's
+    # contract guarantees it. Anything short of silently returning None would
+    # have caught CI run 31948093525 faster than a bare finish_reason.
+    adapter = DshAdapter(DshAdapterConfig())
+    await adapter.run_turn("warmup", "x")  # start the stub
+    stub = _StubHarness.instances[0]
+    stub.next_finish_reason = "error"
+    stub.next_events = [
+        {"type": "turn/end", "data": {"reason": {"kind": "error", "error": "boom"}}}
+    ]
+
+    result = await adapter.run_turn("s1", "hello")
+
+    assert result.error == "boom"
+
+
+async def test_run_turn_error_detail_uses_code_when_message_is_not_a_string():
+    adapter = DshAdapter(DshAdapterConfig())
+    await adapter.run_turn("warmup", "x")  # start the stub
+    stub = _StubHarness.instances[0]
+    stub.next_finish_reason = "error"
+    stub.next_events = [
+        {
+            "type": "turn/end",
+            "data": {"reason": {"kind": "error", "error": {"code": "TRANSPORT"}}},
+        }
+    ]
+
+    result = await adapter.run_turn("s1", "hello")
+
+    assert result.error == "TRANSPORT"
+
+
 async def test_run_turn_error_detail_absent_when_no_turn_end_error_key():
     adapter = DshAdapter(DshAdapterConfig())
     await adapter.run_turn("warmup", "x")  # start the stub

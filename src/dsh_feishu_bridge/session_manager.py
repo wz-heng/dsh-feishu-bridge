@@ -145,10 +145,18 @@ class SessionManager:
                 await self._broadcast(
                     session.id, {"type": "assistant_text", "content": result.text}
                 )
-            if is_error and not result.text:
-                message = f"Turn ended without a reply (reason: {result.finish_reason})."
-                if result.error:
-                    message = f"{message} {result.error}"
+            if is_error and (not result.text or result.error):
+                # A turn can end in error WITH partial text (e.g. the model
+                # produced something before the runtime reported a
+                # turn/end error) — result.error must still reach the chat,
+                # not just get silently dropped behind the assistant_text
+                # broadcast above (Snape review round 1).
+                if result.text:
+                    message = result.error
+                else:
+                    message = f"Turn ended without a reply (reason: {result.finish_reason})."
+                    if result.error:
+                        message = f"{message} {result.error}"
                 await self._broadcast(
                     session.id, {"type": "error", "message": message}
                 )

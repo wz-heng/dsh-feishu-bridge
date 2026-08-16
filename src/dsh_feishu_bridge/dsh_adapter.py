@@ -235,13 +235,21 @@ def _turn_end_error_detail(events: list[dict]) -> str | None:
         data = event.get("data")
         reason = data.get("reason") if isinstance(data, dict) else None
         error = reason.get("error") if isinstance(reason, dict) else None
-        if not isinstance(error, dict):
+        if error is None:
             return None
-        message = error.get("message")
-        code = error.get("code")
-        if isinstance(message, str) and isinstance(code, str):
-            return f"{code}: {message}"
-        return message if isinstance(message, str) else None
+        if isinstance(error, dict):
+            message = error.get("message")
+            code = error.get("code")
+            if isinstance(message, str) and isinstance(code, str):
+                return f"{code}: {message}"
+            if isinstance(message, str):
+                return message
+            if isinstance(code, str):
+                return code
+        # Unknown shape (a bare string, an int code, ...) — better than
+        # silently dropping it, which is the exact gap this function exists
+        # to close (Snape review round 1).
+        return str(error)
     return None
 
 
