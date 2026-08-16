@@ -65,7 +65,11 @@ def test_approval_mode_starts_gateway_and_wires_the_harness_subprocess_env():
         assert gateway.port is not None
 
         adapter = app.state.session_manager._backend
-        assert adapter._config.env["DSH_APPROVAL_CALLBACK_URL"] == gateway.url
+        # Must be callback_url (includes the /approval route), not the bare
+        # `.url` origin — POSTing to the bare origin 404s on every request,
+        # silently denying every approval regardless of anyone's decision.
+        assert adapter._config.env["DSH_APPROVAL_CALLBACK_URL"] == gateway.callback_url
+        assert adapter._config.env["DSH_APPROVAL_CALLBACK_URL"] == f"{gateway.url}/approval"
         # The Node relay's own fallback timeout must be strictly larger than
         # the gateway's deny-timeout — see _APPROVAL_RELAY_TIMEOUT_MARGIN_SECONDS
         # in app.py for why (avoids racing the gateway's own deny response).
@@ -117,6 +121,32 @@ def test_approval_mode_does_not_duplicate_existing_loopback_entry(monkeypatch):
         adapter = app.state.session_manager._backend
         merged = adapter._config.env["no_proxy"]
         assert merged == "127.0.0.1,example.internal,localhost"
+
+
+def test_approval_mode_merges_both_case_variants_when_they_differ(monkeypatch):
+    """A caller can legitimately have DIFFERENT entries in `no_proxy` and
+    `NO_PROXY` (some tools only honor one casing) — picking one with `or`
+    silently drops whichever one isn't picked. Both must survive."""
+    monkeypatch.setenv("no_proxy", "example.internal")
+    monkeypatch.setenv("NO_PROXY", "metadata.google.internal")
+    app = build_app(_settings(dsh_approval_mode=True))
+    with TestClient(app):
+        adapter = app.state.session_manager._backend
+        merged = adapter._config.env["no_proxy"]
+        assert merged == "example.internal,metadata.google.internal,127.0.0.1,localhost"
+        assert adapter._config.env["NO_PROXY"] == merged
+
+
+def test_approval_mode_no_proxy_dedup_is_case_insensitive(monkeypatch):
+    """Hostname comparison is case-insensitive — a caller's `LOCALHOST` must
+    not end up duplicated as a second, differently-cased `localhost` entry."""
+    monkeypatch.setenv("no_proxy", "LOCALHOST,example.internal")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    app = build_app(_settings(dsh_approval_mode=True))
+    with TestClient(app):
+        adapter = app.state.session_manager._backend
+        merged = adapter._config.env["no_proxy"]
+        assert merged == "LOCALHOST,example.internal,127.0.0.1"
 
 
 def test_approval_mode_off_does_not_touch_no_proxy():

@@ -19,6 +19,7 @@ import os
 
 import pytest
 
+from dsh_feishu_bridge.app import _APPROVAL_RELAY_TIMEOUT_MARGIN_SECONDS
 from dsh_feishu_bridge.approval_gateway import ApprovalGateway
 from dsh_feishu_bridge.approval_runtime import bundled_cordis_path
 from dsh_feishu_bridge.dsh_adapter import DshAdapter, DshAdapterConfig
@@ -34,6 +35,13 @@ pytestmark = [
 
 async def _make_adapter(tmp_path, gateway: ApprovalGateway) -> DshAdapter:
     await gateway.start()
+    # Mirrors app.py's lifespan wiring exactly (callback_url, not the bare
+    # `.url` origin — POSTing to the bare origin 404s on every approval
+    # request, never reaching the gateway's handler at all; and the relay's
+    # own fallback timeout margin over the gateway's timeout) so this test
+    # actually exercises the same wiring production uses, not a stand-in
+    # that happens to look similar.
+    timeout_ms = int((gateway.timeout_seconds + _APPROVAL_RELAY_TIMEOUT_MARGIN_SECONDS) * 1000)
     return DshAdapter(
         DshAdapterConfig(
             cwd=str(tmp_path),
@@ -43,8 +51,8 @@ async def _make_adapter(tmp_path, gateway: ApprovalGateway) -> DshAdapter:
             cordis=str(bundled_cordis_path()),
             request_timeout_seconds=120.0,
             env={
-                "DSH_APPROVAL_CALLBACK_URL": gateway.url,
-                "DSH_APPROVAL_TIMEOUT_MS": "60000",
+                "DSH_APPROVAL_CALLBACK_URL": gateway.callback_url,
+                "DSH_APPROVAL_TIMEOUT_MS": str(timeout_ms),
             },
         )
     )

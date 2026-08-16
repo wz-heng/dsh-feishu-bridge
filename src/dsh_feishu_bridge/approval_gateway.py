@@ -40,6 +40,13 @@ _OUTCOME_DENY = "rejected"
 
 _ALLOWED_OUTCOMES = frozenset({_OUTCOME_ALLOW, _OUTCOME_DENY, "cancelled"})
 
+# Single source of truth for the callback route, shared between the route
+# registration in start() and callback_url below — a caller that builds its
+# own callback URL by hand from `.url` (the bare origin) has no compiler or
+# route-table check to catch drift if this path ever changes; `callback_url`
+# exists so nothing outside this module needs to know the path at all.
+_APPROVAL_PATH = "/approval"
+
 
 class ApprovalGateway:
     """Owns pending approval decisions and the loopback callback server.
@@ -73,16 +80,39 @@ class ApprovalGateway:
         self.port: int | None = None
 
     @property
+    def timeout_seconds(self) -> float:
+        """This gateway's own deny-timeout — read-only, so a caller wiring
+        up a relay's fallback timeout (which must run LARGER than this one;
+        see ``app.py``'s ``_APPROVAL_RELAY_TIMEOUT_MARGIN_SECONDS``) has a
+        single source of truth to derive it from instead of duplicating the
+        literal passed to ``__init__``."""
+        return self._timeout_seconds
+
+    @property
     def url(self) -> str:
+        """Bare origin the gateway listens on — ``http://host:port``, no
+        path. For the URL a caller should actually POST tool-approval
+        callbacks to, use :attr:`callback_url`."""
         if self.port is None:
             raise RuntimeError("ApprovalGateway.start() has not completed yet")
         return f"http://{self._host}:{self.port}"
+
+    @property
+    def callback_url(self) -> str:
+        """The full URL ``approval-relay.mjs`` (or any other caller) must
+        POST to — what ``DSH_APPROVAL_CALLBACK_URL`` needs to be set to.
+        Deliberately distinct from :attr:`url`: a caller that appends the
+        route path itself has no check tying it to the actual registered
+        route, which is exactly how a prior version of this callback wiring
+        silently 404'd every approval request (POSTing to the bare origin,
+        never reaching ``_handle_request`` at all)."""
+        return f"{self.url}{_APPROVAL_PATH}"
 
     async def start(self) -> None:
         if self._server is not None:
             return
         app = FastAPI(openapi_url=None, docs_url=None, redoc_url=None)
-        app.post("/approval")(self._handle_request)
+        app.post(_APPROVAL_PATH)(self._handle_request)
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

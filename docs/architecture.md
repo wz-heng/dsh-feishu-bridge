@@ -85,9 +85,13 @@ and `approval_runtime/approval-relay.mjs` answers the resulting
 `approval/request` with a plain HTTP POST — a side channel of this bridge's
 own, not the SDK's stdio protocol — to `ApprovalGateway`
 (`approval_gateway.py`), a loopback-only server (`127.0.0.1`, never the
-public app) started alongside the FastAPI app. `ApprovalGateway.url` is
-handed to the harness subprocess via `DSH_APPROVAL_CALLBACK_URL` when
-`DshAdapterConfig.env` is built (see `app.py`). The gateway publishes a
+public app) started alongside the FastAPI app. `ApprovalGateway.callback_url`
+is handed to the harness subprocess via `DSH_APPROVAL_CALLBACK_URL` when
+`DshAdapterConfig.env` is built (see `app.py`) — deliberately distinct from
+the bare `.url` origin, since a caller building the callback path by hand
+from `.url` has nothing tying it to the route `start()` actually registers
+(exactly how an earlier version of this wiring silently 404'd every
+approval request). The gateway publishes a
 `tool_approval_request` broadcast through the *existing*
 `SessionManager`/`Bridge.handle_event` fan-out (`FeishuBridge.
 send_tool_approval_request` and the "approval" nonce-kind branch in

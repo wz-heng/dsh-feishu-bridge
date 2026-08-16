@@ -44,13 +44,26 @@ _LOOPBACK_NO_PROXY_HOSTS = ("127.0.0.1", "localhost")
 _APPROVAL_RELAY_TIMEOUT_MARGIN_SECONDS = 5.0
 
 
-def _merge_no_proxy(existing: str | None) -> str:
-    """Merge :data:`_LOOPBACK_NO_PROXY_HOSTS` into a caller-supplied
-    ``no_proxy``/``NO_PROXY`` value, preserving order and never dropping
-    entries the caller already has."""
-    entries = [item.strip() for item in (existing or "").split(",") if item.strip()]
+def _merge_no_proxy(*existing: str | None) -> str:
+    """Merge :data:`_LOOPBACK_NO_PROXY_HOSTS` into one or more caller-supplied
+    ``no_proxy``/``NO_PROXY`` values, preserving order and never dropping an
+    entry the caller already has. Takes both var forms (rather than picking
+    one with ``or``) because a caller can legitimately have DIFFERENT entries
+    in each — some tools only honor the lowercase form, some only the
+    uppercase one, so a caller hedging with both loses whichever one this
+    function ignores. Hostname comparison is case-insensitive (hostnames
+    are), output preserves each entry's original casing."""
+    entries: list[str] = []
+    seen: set[str] = set()
+    for value in existing:
+        for item in (value or "").split(","):
+            item = item.strip()
+            if item and item.lower() not in seen:
+                seen.add(item.lower())
+                entries.append(item)
     for host in _LOOPBACK_NO_PROXY_HOSTS:
-        if host not in entries:
+        if host.lower() not in seen:
+            seen.add(host.lower())
             entries.append(host)
     return ",".join(entries)
 
@@ -114,7 +127,7 @@ def build_app(settings: Settings) -> FastAPI:
     async def lifespan(_app: FastAPI):
         if approval_gateway is not None:
             await approval_gateway.start()
-            env["DSH_APPROVAL_CALLBACK_URL"] = approval_gateway.url
+            env["DSH_APPROVAL_CALLBACK_URL"] = approval_gateway.callback_url
             env["DSH_APPROVAL_TIMEOUT_MS"] = str(
                 int(
                     (settings.dsh_approval_timeout_seconds + _APPROVAL_RELAY_TIMEOUT_MARGIN_SECONDS)
@@ -122,7 +135,7 @@ def build_app(settings: Settings) -> FastAPI:
                 )
             )
             no_proxy = _merge_no_proxy(
-                os.environ.get("no_proxy") or os.environ.get("NO_PROXY")
+                os.environ.get("no_proxy"), os.environ.get("NO_PROXY")
             )
             env["no_proxy"] = no_proxy
             env["NO_PROXY"] = no_proxy

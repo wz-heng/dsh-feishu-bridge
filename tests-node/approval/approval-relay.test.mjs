@@ -197,9 +197,24 @@ async function withEnv(overrides, fn) {
   }
 }
 
-test('directHttpPost: real round trip over a loopback server, no fetchImpl override', async () => {
+/** Mimics ApprovalGateway's real route table: only POST /approval answers;
+ * everything else 404s, exactly like the real gateway would for a caller
+ * that (mis)built its callback URL from the bare origin (approval_gateway.py
+ * registers `app.post("/approval")` and nothing else). */
+function startApprovalOnlyServer(onApproval) {
+  return startServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/approval') {
+      res.writeHead(404, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ detail: 'Not Found' }))
+      return
+    }
+    onApproval(req, res)
+  })
+}
+
+test('directHttpPost: real round trip over a loopback server at /approval, no fetchImpl override', async () => {
   const requests = []
-  const server = await startServer((req, res) => {
+  const server = await startApprovalOnlyServer((req, res) => {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
@@ -210,13 +225,13 @@ test('directHttpPost: real round trip over a loopback server, no fetchImpl overr
   })
   try {
     const { ctx, handlers } = makeCtx()
-    apply(ctx, { callbackUrl: serverUrl(server) })
+    apply(ctx, { callbackUrl: `${serverUrl(server)}/approval` })
     const handler = handlers.get('approval/request')
     const outcome = await handler(baseReq(), NEXT_UNAVAILABLE)
     assert.equal(outcome, 'allowed-once')
     assert.equal(requests.length, 1)
     assert.equal(requests[0].method, 'POST')
-    assert.equal(requests[0].url, '/')
+    assert.equal(requests[0].url, '/approval')
     assert.deepEqual(requests[0].body, {
       sessionId: 'sess-1', toolName: 'bash', callId: 'call-1', reason: 'ls -la',
     })
@@ -225,14 +240,33 @@ test('directHttpPost: real round trip over a loopback server, no fetchImpl overr
   }
 })
 
+test('directHttpPost: a callback URL missing the /approval path 404s and denies (regression)', async () => {
+  // The exact bug this whole route mismatch class produces: POSTing to the
+  // bare origin instead of callback_url hits nothing but the 404 fallback
+  // below, so it fails closed — but silently, with no card ever shown.
+  const server = await startApprovalOnlyServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ outcome: 'allowed-once' }))
+  })
+  try {
+    const { ctx, handlers } = makeCtx()
+    apply(ctx, { callbackUrl: serverUrl(server) }) // missing /approval, on purpose
+    const handler = handlers.get('approval/request')
+    const outcome = await handler(baseReq(), NEXT_UNAVAILABLE)
+    assert.equal(outcome, 'rejected')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test('directHttpPost: denies on a real non-2xx response, no fetchImpl override', async () => {
-  const server = await startServer((_req, res) => {
+  const server = await startApprovalOnlyServer((_req, res) => {
     res.writeHead(500, { 'content-type': 'application/json' })
     res.end(JSON.stringify({ outcome: 'allowed-once' }))
   })
   try {
     const { ctx, handlers } = makeCtx()
-    apply(ctx, { callbackUrl: serverUrl(server) })
+    apply(ctx, { callbackUrl: `${serverUrl(server)}/approval` })
     const handler = handlers.get('approval/request')
     const outcome = await handler(baseReq(), NEXT_UNAVAILABLE)
     assert.equal(outcome, 'rejected')
@@ -253,7 +287,7 @@ test('directHttpPost never routes through HTTP_PROXY/http_proxy — reaches the 
     res.writeHead(502)
     res.end('proxy refuses to forward loopback')
   })
-  const realTarget = await startServer((req, res) => {
+  const realTarget = await startApprovalOnlyServer((req, res) => {
     let raw = ''
     req.on('data', (chunk) => (raw += chunk))
     req.on('end', () => {
@@ -271,7 +305,7 @@ test('directHttpPost never routes through HTTP_PROXY/http_proxy — reaches the 
       },
       async () => {
         const { ctx, handlers } = makeCtx()
-        apply(ctx, { callbackUrl: serverUrl(realTarget) })
+        apply(ctx, { callbackUrl: `${serverUrl(realTarget)}/approval` })
         const handler = handlers.get('approval/request')
         const outcome = await handler(baseReq(), NEXT_UNAVAILABLE)
         assert.equal(outcome, 'rejected')
@@ -293,7 +327,7 @@ test('directHttpPost rejects when the real connection is aborted by our own time
   })
   try {
     const { ctx, handlers } = makeCtx()
-    apply(ctx, { callbackUrl: serverUrl(server), timeoutMs: 30 })
+    apply(ctx, { callbackUrl: `${serverUrl(server)}/approval`, timeoutMs: 30 })
     const handler = handlers.get('approval/request')
     const outcome = await handler(baseReq(), NEXT_UNAVAILABLE)
     assert.equal(outcome, 'rejected')

@@ -59,10 +59,38 @@ class TestStartStop:
         assert gateway.port is not None and gateway.port > 0
         assert gateway.url == f"http://127.0.0.1:{gateway.port}"
 
+    async def test_callback_url_includes_the_actual_registered_route(self, gateway: ApprovalGateway):
+        """Regression test: a caller that used the bare `.url` origin as the
+        callback URL (POSTing to `/`) would 404 on every single request —
+        `_handle_request` never runs, so `resolve()` never has anything
+        pending and no card is ever shown, no matter what the caller
+        decides. `callback_url` must match the route `start()` actually
+        registers, proven by driving a real request through it end to end
+        (not just string-comparing the two)."""
+        assert gateway.callback_url == f"{gateway.url}/approval"
+        async with httpx.AsyncClient(trust_env=False) as client:
+            request = asyncio.ensure_future(
+                client.post(
+                    gateway.callback_url,
+                    json={"sessionId": "known-session", "callId": "call-1", "toolName": "bash"},
+                    timeout=10.0,
+                )
+            )
+            await _wait_for_pending(gateway, ("known-session", "call-1"))
+            assert gateway.resolve("known-session", "call-1", True) is True
+            response = await request
+        assert response.status_code == 200
+        assert response.json() == {"outcome": "allowed-once"}
+
     async def test_url_before_start_raises(self):
         gw = ApprovalGateway(notify=NotifyRecorder(), session_exists=lambda _sid: True, timeout_seconds=1.0)
         with pytest.raises(RuntimeError):
             _ = gw.url
+
+    async def test_callback_url_before_start_raises(self):
+        gw = ApprovalGateway(notify=NotifyRecorder(), session_exists=lambda _sid: True, timeout_seconds=1.0)
+        with pytest.raises(RuntimeError):
+            _ = gw.callback_url
 
     async def test_start_is_idempotent(self, gateway: ApprovalGateway):
         port_before = gateway.port
