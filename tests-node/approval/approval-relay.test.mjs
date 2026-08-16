@@ -1,5 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import http from 'node:http'
 import { apply, name } from '../../src/dsh_feishu_bridge/approval_runtime/approval-relay.mjs'
 
 function makeCtx() {
@@ -165,6 +166,140 @@ test("reports 'cancelled' when the ORIGINAL request signal aborts, not our timeo
   const pending = handler(baseReq({ signal: controller.signal }), NEXT_UNAVAILABLE)
   controller.abort()
   assert.equal(await pending, 'cancelled')
+})
+
+/** Starts a plain node:http server; caller must close() it. */
+function startServer(handler) {
+  return new Promise((resolve) => {
+    const server = http.createServer(handler)
+    server.listen(0, '127.0.0.1', () => resolve(server))
+  })
+}
+
+function serverUrl(server) {
+  return `http://127.0.0.1:${server.address().port}`
+}
+
+/** Sets env vars for the duration of `fn`, restoring the previous values
+ * (including "was unset") afterward — mirrors the pattern already used
+ * above for DSH_APPROVAL_CALLBACK_URL/DSH_APPROVAL_TIMEOUT_MS. */
+async function withEnv(overrides, fn) {
+  const previous = {}
+  for (const key of Object.keys(overrides)) previous[key] = process.env[key]
+  for (const [key, value] of Object.entries(overrides)) process.env[key] = value
+  try {
+    await fn()
+  } finally {
+    for (const key of Object.keys(overrides)) {
+      if (previous[key] === undefined) delete process.env[key]
+      else process.env[key] = previous[key]
+    }
+  }
+}
+
+test('directHttpPost: real round trip over a loopback server, no fetchImpl override', async () => {
+  const requests = []
+  const server = await startServer((req, res) => {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      requests.push({ method: req.method, url: req.url, body: JSON.parse(raw) })
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ outcome: 'allowed-once' }))
+    })
+  })
+  try {
+    const { ctx, handlers } = makeCtx()
+    apply(ctx, { callbackUrl: serverUrl(server) })
+    const handler = handlers.get('approval/request')
+    const outcome = await handler(baseReq(), NEXT_UNAVAILABLE)
+    assert.equal(outcome, 'allowed-once')
+    assert.equal(requests.length, 1)
+    assert.equal(requests[0].method, 'POST')
+    assert.equal(requests[0].url, '/')
+    assert.deepEqual(requests[0].body, {
+      sessionId: 'sess-1', toolName: 'bash', callId: 'call-1', reason: 'ls -la',
+    })
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('directHttpPost: denies on a real non-2xx response, no fetchImpl override', async () => {
+  const server = await startServer((_req, res) => {
+    res.writeHead(500, { 'content-type': 'application/json' })
+    res.end(JSON.stringify({ outcome: 'allowed-once' }))
+  })
+  try {
+    const { ctx, handlers } = makeCtx()
+    apply(ctx, { callbackUrl: serverUrl(server) })
+    const handler = handlers.get('approval/request')
+    const outcome = await handler(baseReq(), NEXT_UNAVAILABLE)
+    assert.equal(outcome, 'rejected')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('directHttpPost never routes through HTTP_PROXY/http_proxy — reaches the real loopback target directly', async () => {
+  // A fake "proxy" that would answer wrong (and prove it was consulted) if
+  // directHttpPost honored the env proxy the way undici's global fetch can
+  // once a runtime opts into --use-env-proxy/NODE_USE_ENV_PROXY. This is the
+  // exact real-machine fingerprint from the task: a proxy that doesn't (or
+  // can't) forward a loopback target answers with a 502.
+  let proxyHits = 0
+  const fakeProxy = await startServer((_req, res) => {
+    proxyHits += 1
+    res.writeHead(502)
+    res.end('proxy refuses to forward loopback')
+  })
+  const realTarget = await startServer((req, res) => {
+    let raw = ''
+    req.on('data', (chunk) => (raw += chunk))
+    req.on('end', () => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end(JSON.stringify({ outcome: 'rejected' }))
+    })
+  })
+  try {
+    await withEnv(
+      {
+        http_proxy: serverUrl(fakeProxy),
+        HTTP_PROXY: serverUrl(fakeProxy),
+        https_proxy: serverUrl(fakeProxy),
+        HTTPS_PROXY: serverUrl(fakeProxy),
+      },
+      async () => {
+        const { ctx, handlers } = makeCtx()
+        apply(ctx, { callbackUrl: serverUrl(realTarget) })
+        const handler = handlers.get('approval/request')
+        const outcome = await handler(baseReq(), NEXT_UNAVAILABLE)
+        assert.equal(outcome, 'rejected')
+        assert.equal(proxyHits, 0, 'the fake proxy must never be contacted')
+      }
+    )
+  } finally {
+    await new Promise((resolve) => fakeProxy.close(resolve))
+    await new Promise((resolve) => realTarget.close(resolve))
+  }
+})
+
+test('directHttpPost rejects when the real connection is aborted by our own timeout (fail-closed)', async () => {
+  // A server that accepts the connection but never responds — the closest
+  // real-transport analogue of "the callback never comes back", the exact
+  // shape the fallback timeout margin (app.py) exists to bound.
+  const server = await startServer(() => {
+    /* never responds */
+  })
+  try {
+    const { ctx, handlers } = makeCtx()
+    apply(ctx, { callbackUrl: serverUrl(server), timeoutMs: 30 })
+    const handler = handlers.get('approval/request')
+    const outcome = await handler(baseReq(), NEXT_UNAVAILABLE)
+    assert.equal(outcome, 'rejected')
+  } finally {
+    await new Promise((resolve) => server.close(resolve))
+  }
 })
 
 test('reads DSH_APPROVAL_CALLBACK_URL / DSH_APPROVAL_TIMEOUT_MS from the environment', async () => {

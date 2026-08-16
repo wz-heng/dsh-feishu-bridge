@@ -24,12 +24,73 @@
  * than composing in a silently-inert gate (see the check below), and every
  * failure path of the relay call itself (non-2xx, malformed body, network
  * error, timeout) denies rather than allows.
+ *
+ * The callback POST deliberately goes over `node:http`/`node:https`
+ * directly, NOT the global `fetch`. `callbackUrl` is always a loopback
+ * origin (`ApprovalGateway` binds `127.0.0.1` only — approval_gateway.py),
+ * but the runtime subprocess inherits its parent's full environment
+ * (`deepseek_harness.client.HarnessClient.start()` merges config env ON TOP
+ * of `os.environ.copy()`, never replacing it), so an ambient
+ * `HTTP_PROXY`/`http_proxy` from a system-wide proxy is present unless the
+ * caller exempts loopback (see `app.py`'s `no_proxy` injection — belt).
+ * `node:http`'s `request()` has no proxy awareness at all: unlike global
+ * `fetch`, whose underlying dispatcher picks up an env-derived proxy once
+ * the runtime opts into `--use-env-proxy`/`NODE_USE_ENV_PROXY`, plain
+ * `http.request` never consults those regardless of Node build or flags.
+ * Using it here is the suspenders: this call cannot be proxied no matter
+ * what the process environment says.
  * @module dsh-feishu-bridge/approval-runtime/approval-relay
  */
+
+import http from 'node:http'
+import https from 'node:https'
 
 const DEFAULT_TIMEOUT_MS = 60_000
 
 const ALLOWED_OUTCOMES = new Set(['allowed-once', 'rejected', 'cancelled'])
+
+/**
+ * POST a JSON body to a loopback `http:`/`https:` URL via `node:http`/
+ * `node:https` directly — never the global `fetch` — so this categorically
+ * cannot be routed through an env-configured proxy (see module docstring).
+ * Mirrors the subset of the `fetch` response contract the caller below
+ * actually uses (`ok`, `status`, `json()`), so it's a drop-in default for
+ * the `fetchImpl` seam.
+ * @param {string} url
+ * @param {{method: string, headers: Record<string, string>, body: string, signal: AbortSignal}} options
+ * @returns {Promise<{ok: boolean, status: number, json: () => Promise<any>}>}
+ */
+function directHttpPost(url, { method, headers, body, signal }) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url)
+    const transport = target.protocol === 'https:' ? https : http
+    const req = transport.request(
+      {
+        hostname: target.hostname,
+        port: target.port || undefined,
+        path: `${target.pathname}${target.search}`,
+        method,
+        headers,
+        signal,
+      },
+      (res) => {
+        const chunks = []
+        res.on('data', (chunk) => chunks.push(chunk))
+        res.on('end', () => {
+          const status = res.statusCode ?? 0
+          resolve({
+            ok: status >= 200 && status < 300,
+            status,
+            json: async () => JSON.parse(Buffer.concat(chunks).toString('utf8')),
+          })
+        })
+        res.on('error', reject)
+      }
+    )
+    req.on('error', reject)
+    req.end(body)
+  })
+}
 
 /** Stable cordis plugin name. */
 export const name = 'approval-relay'
@@ -41,7 +102,7 @@ export const inject = []
  * @typedef {object} Config
  * @property {string} [callbackUrl] - overrides `$DSH_APPROVAL_CALLBACK_URL`.
  * @property {number} [timeoutMs] - overrides `$DSH_APPROVAL_TIMEOUT_MS` (default 60000).
- * @property {{ fetchImpl?: Function }} [internals] - test seam, mirroring the `internals` hook used elsewhere in this repo (see `lib/index.mjs`).
+ * @property {{ fetchImpl?: Function }} [internals] - test seam, mirroring the `internals` hook used elsewhere in this repo (see `lib/index.mjs`). Named for the `fetch`-shaped contract it fulfills (`(url, options) => {ok, status, json()}`), not the underlying transport — the production default is `directHttpPost`, not `fetch`.
  */
 
 /**
@@ -63,7 +124,7 @@ export function apply(ctx, config = {}) {
   }
   const timeoutMs = config.timeoutMs
     ?? (process.env.DSH_APPROVAL_TIMEOUT_MS ? Number(process.env.DSH_APPROVAL_TIMEOUT_MS) : DEFAULT_TIMEOUT_MS)
-  const fetchImpl = config.internals?.fetchImpl ?? fetch
+  const fetchImpl = config.internals?.fetchImpl ?? directHttpPost
 
   ctx.on('approval/request', async (req, next) => {
     // No callId means nothing routes a decision back to a specific tool

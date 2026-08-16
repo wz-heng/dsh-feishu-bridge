@@ -105,6 +105,31 @@ deny; nothing in this design can fail open.
 approval round-trip happens on the loopback side channel, fully orthogonal
 to the stdio JSON-RPC channel `run_turn` is already blocked on.
 
+**Loopback callback is proxy-immune, on both ends.** The harness subprocess
+inherits its parent's FULL environment (`deepseek_harness.client.
+HarnessClient.start()` merges `DshAdapterConfig.env` on top of
+`os.environ.copy()`, never replacing it) — so an ambient `HTTP_PROXY`/
+`http_proxy` from a system-wide proxy (Clash and friends) is present unless
+exempted. A real-machine acceptance run hit exactly this: the proxy declined
+to forward the loopback callback address (502), and the pending approval
+never got far enough to notify anyone — no card, no deny, an unbounded
+hang, because the gateway's own deny-timeout only starts counting once a
+request has actually arrived and been parsed; it can't time out a request
+that never gets there. Two independent defenses close this, deliberately
+redundant: `app.py`'s lifespan injects `no_proxy=127.0.0.1,localhost`
+(merged with any caller-supplied value, never overwriting it) into the
+subprocess env; and `approval-relay.mjs`'s callback POST goes over
+`node:http`/`node:https` directly rather than the global `fetch` — plain
+`http.request` has no proxy awareness at all, so the callback cannot be
+proxied regardless of what the process environment says or what a future
+Node default (`--use-env-proxy`/`NODE_USE_ENV_PROXY`) does. On top of that,
+the relay's own fallback timeout (`DSH_APPROVAL_TIMEOUT_MS`) is set a few
+seconds LARGER than the gateway's `timeout_seconds`, not equal to it — so
+the gateway's own (more informative) deny response always has time to
+travel back over loopback before the relay gives up on its own; the relay's
+timeout is purely a backstop for "the callback never reaches the gateway at
+all," which the gateway-side timeout structurally cannot cover.
+
 ## Why sticky sessions don't survive a restart
 
 `docs/user/guide/python-sdk.md` confirms session continuity *within* one
