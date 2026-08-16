@@ -11,6 +11,14 @@
 - 一套生产级飞书机器人桥（fail-closed 白名单、一次性卡片 nonce、per-chat 输出详略、sticky session、`ws`/`webhook` 双 transport），从另一个 agent harness 项目的成熟飞书桥移植而来，改接到 `dsh`。
 - 与 `deepseek-harness-sdk` 对话的薄适配层集中在一个文件 `src/dsh_feishu_bridge/dsh_adapter.py`，SDK 版本精确锁定——harness 目前是 v0.1 developer preview，版本间明示会有破坏性变更。
 
+## 截图
+
+![默认 fail-closed：启动、拒绝、加白、回复](docs/screenshots/fail-closed-boot.png)
+
+![以 dsh 插件方式安装](docs/screenshots/dsh-plugin-add.png)
+
+![架构：飞书 → fail-closed 边界 → DeepSeek Harness](docs/screenshots/architecture.png)
+
 ## 5 分钟快速上手
 
 ```sh

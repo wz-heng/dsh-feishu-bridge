@@ -11,6 +11,14 @@ A Feishu (Lark) channel bridge for [DeepSeek Harness](https://github.com/deepsee
 - A production-grade Feishu bot bridge (fail-closed allowlist, one-time card nonces, per-chat verbosity, sticky sessions, both `ws` and `webhook` transports) ported from a mature bridge in another agent-harness project and adapted to drive `dsh` instead.
 - The thin adapter that talks to `deepseek-harness-sdk` lives in one file, `src/dsh_feishu_bridge/dsh_adapter.py`, and the SDK version is pinned exactly — the harness is a v0.1 developer preview that documents breaking changes between releases.
 
+## Screenshots
+
+![Fail-closed by default: boot, reject, allowlist, reply](docs/screenshots/fail-closed-boot.png)
+
+![Install as a dsh plugin](docs/screenshots/dsh-plugin-add.png)
+
+![Architecture: Feishu → fail-closed boundary → DeepSeek Harness](docs/screenshots/architecture.png)
+
 ## Quickstart (5 minutes)
 
 ```sh
