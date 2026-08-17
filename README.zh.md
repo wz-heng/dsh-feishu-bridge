@@ -65,17 +65,28 @@ python -m dsh_feishu_bridge
 # 或: dsh-feishu-bridge
 ```
 
-在飞书里给机器人发消息。未在白名单里的 `open_id` 发来的第一条消息会被静默拒绝并记录日志——这条日志就是你查到自己 `open_id` 的方式（见下方"获取你的 open_id"）。
+在飞书里给机器人发消息——在**私聊**里发 `/pair <码>`，用 bridge 启动时打印在控制台的一次性配对码（见下方"获取你的 open_id"）。码对了，你的 `open_id` 立刻加入白名单,不用重启。不在白名单里的 `open_id` 发来的其他任何消息都会被静默拒绝。
 
 ### 获取你的 open_id
 
-先给机器人发一条消息（它不会回复——这是预期行为，fail-closed）。在服务端日志里找这样一行：
+bridge 一启动就会在自己的控制台打印一个一次性配对码：
+
+```
+[dsh-feishu-bridge] Pairing code: 7K9XQPRT
+Send '/pair 7K9XQPRT' to the bot in a PRIVATE chat to get on the allowlist. Valid for 900s or 5 wrong tries, whichever comes first.
+```
+
+给机器人发消息时**要用私聊(1:1),不要用群聊**——`/pair <码>` 在群聊里一律不受理,这样码就永远不用经过群聊。码对了,你的 `open_id` 立刻加入白名单(不用重启),并持久化到 `FEISHU_PAIRING_STATE_PATH`(默认 `data/feishu_paired_open_ids.json`,一个 `{"open_ids": [...]}` 文件),下次重启也还在。每个进程一个码、一次成功配对——想要新码就重启 bridge;超过 `FEISHU_PAIRING_MAX_ATTEMPTS`(默认 5)次错误尝试,或超过 `FEISHU_PAIRING_TTL_SECONDS`(默认 900 秒/15 分钟)有效期,这一轮配对会提前失效。想手动管理白名单,用 `FEISHU_PAIRING=0` 整体关掉这个功能。
+
+**备选方案:捞日志。** 关闭配对功能后(或者你就是不想用它),给机器人发一条消息(它不会回复——这是预期行为,fail-closed),然后在服务端日志里找这样一行:
 
 ```
 Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc_xxxx)
 ```
 
-把这个 `open_id` 填进 `FEISHU_ALLOWED_OPEN_IDS`，重启即可。
+把这个 `open_id` 填进 `FEISHU_ALLOWED_OPEN_IDS`,重启即可。
+
+**撤销权限。** 从 env 加白的 id,把它从 `FEISHU_ALLOWED_OPEN_IDS` 里删掉再重启即可撤销。通过 `/pair` 加白的 id 是独立存储的——从 `FEISHU_PAIRING_STATE_PATH` 的 `open_ids` 列表里删掉那一项(或直接删文件),再重启。
 
 ## 作为 dsh 插件安装
 
@@ -161,6 +172,11 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 | `FEISHU_DOMAIN` | `https://open.feishu.cn` | Lark 国际版或走代理时修改。 |
 | `FEISHU_ALLOWED_OPEN_IDS` | *(空)* | 逗号分隔。**必填**——为空则无人被授权。 |
 | `FEISHU_ALLOWED_CHAT_IDS` | *(空 = 不限制)* | 逗号分隔的群聊白名单。 |
+| `FEISHU_PAIRING` | `1` | `0`/`false` 整体关闭一次性配对码 onboarding——见"获取你的 open_id"。 |
+| `FEISHU_PAIRING_TTL_SECONDS` | `900` | 配对码从 bridge 启动起算的有效期。 |
+| `FEISHU_PAIRING_MAX_ATTEMPTS` | `5` | 锁定这一轮配对之前允许的错误尝试次数。 |
+| `FEISHU_PAIRING_CODE_LENGTH` | `8` | 配对码长度；至少 8（否则启动失败）。 |
+| `FEISHU_PAIRING_STATE_PATH` | `data/feishu_paired_open_ids.json` | 已配对 `open_id` 的持久化位置（`{"open_ids": [...]}`）——从不包含 env 白名单，所以从 `FEISHU_ALLOWED_OPEN_IDS` 删掉一个 id 重启后依然生效撤销。 |
 | `DSH_FEISHU_BRIDGE_HOST` | `0.0.0.0` | HTTP 服务绑定地址（健康检查 + webhook 路由）。 |
 | `DSH_FEISHU_BRIDGE_PORT` | `8788` | HTTP 服务端口。 |
 
@@ -172,6 +188,7 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 - **卡片按钮（会话切换、工具审批）使用一次性、绑定身份的 nonce。** nonce 铸造时精确绑定某个 action + session（审批卡片还额外绑定具体的工具调用）；二次点击、重放的 nonce、被篡改的卡片 value 都会被拒绝且不生效。
 - **会话归创建它的聊天所有。** `/sessions` 只列出（`/switch` 也只接受）发起请求的聊天自己拥有的会话——即便两个聊天都在白名单里，也不能列出或劫持另一个聊天的会话 id 来偷看它的回复。工具审批的决策同样在服务端做这一层归属校验，不是只靠 nonce 的作用域。
 - **审批模式的回调服务器只监听回环地址。** 它绑定 `127.0.0.1` 上一个独立的临时端口，和对外的 webhook/健康检查端口分开；这个地址只会写进 harness 子进程自己的环境变量，不会暴露给任何远端能触达的地方。
+- **配对码只存在于控制台 stdout 上,和 `.env` 已经在的同一个信任边界**——能读控制台的人本来就能直接改白名单。它在启动时打印一次,之后再也不会出现在任何日志行里。校验用常数时间比较,码一次性使用、会过期(`FEISHU_PAIRING_TTL_SECONDS`)、错够 `FEISHU_PAIRING_MAX_ATTEMPTS` 次会锁定;`/pair` 在群聊里一律静默不受理,陌生人从它这能得到的回复,除了"错了"或"现在不可用",不会透露任何更多信息。
 - 请以 composition 实际需要的最小权限运行本 bridge 进程。内置默认的 `dsh` composition（`examples/jsonrpc-agent` 上游）用的是 `danger-full-access` 的 bash——请在一次性工作区/容器里跑，不要对着你在意的机器跑——不论是否同时开启审批模式（这是两个互相独立的控制手段，见"远程工具审批"）。
 
 ## 限制（v1，刻意为之）
@@ -182,6 +199,7 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 - **会话仅在单个 bridge 进程内 sticky。** 重启会起一个全新的 `DeepSeekHarness` 子进程；通过共享 `session_root` 跨重启恢复并不是 SDK v0.1 文档承诺的行为，所以本桥不会在其之上搭建未经证实的持久化。聊天的 sticky session 指针和它的 `/quiet`/`/verbose` 偏好都会在重启后重置。
 - **仅支持文本消息**——不支持语音/图片/文件附件，也不支持话题/子话题回复（一个聊天只有一个 sticky session，跨话题共享会悄悄串台）。
 - **每个 bridge 进程只有一份模型配置**——provider/model/cordis composition 是进程级的，不是按聊天区分的。没有 `/agent` 式的重新绑定命令；如果需要第二份配置，跑第二个 bridge 进程（不同端口、不同飞书 app 或白名单）。
+- **同一时间只有一个配对码,且只能自己配对自己。** `/pair` 只能把*发送者自己*的 `open_id` 加白——没有代人配对的办法,每个进程也永远只有一个码活着。第二个人要加入,得等(或者由运维触发)一次重启拿新码。
 
 ## 开发
 

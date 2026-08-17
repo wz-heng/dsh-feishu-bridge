@@ -20,6 +20,15 @@ feishu:
     - ou_replace_with_your_open_id
   allowed_chat_ids: []  # empty = no group restriction (still gated by @-mention)
 
+  # One-time pairing-code onboarding — on by default, see README "Getting
+  # your open_id". These are all optional; shown here with their defaults.
+  pairing:
+    enabled: true
+    ttl_seconds: 900
+    max_attempts: 5
+    code_length: 8
+    state_path: data/feishu_paired_open_ids.json
+
 dsh:
   provider: deepseek-official
   model: deepseek-v4-flash

@@ -9,6 +9,7 @@ import queue
 import secrets
 import threading
 import time
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -16,6 +17,14 @@ from lark_channel import FeishuChannel, SecurityConfig, TransportConfig
 from lark_channel.core.utils import AESCipher
 import lark_channel.ws.client as _lark_ws_client
 
+from ..pairing import (
+    DEFAULT_CODE_LENGTH,
+    DEFAULT_MAX_ATTEMPTS,
+    DEFAULT_TTL_SECONDS,
+    OUTCOME_INVALID,
+    OUTCOME_OK,
+    PairingGate,
+)
 from .base import Bridge
 from .manager import BridgeManager
 
@@ -199,6 +208,11 @@ def build_feishu_bridge(
         domain=settings.feishu_domain,
         allowed_open_ids=settings.feishu_allowed_open_ids or None,
         allowed_chat_ids=settings.feishu_allowed_chat_ids or None,
+        pairing_enabled=settings.feishu_pairing_enabled,
+        pairing_ttl_seconds=settings.feishu_pairing_ttl_seconds,
+        pairing_max_attempts=settings.feishu_pairing_max_attempts,
+        pairing_code_length=settings.feishu_pairing_code_length,
+        pairing_state_path=settings.feishu_pairing_state_path,
     )
 
 
@@ -229,6 +243,11 @@ class FeishuBridge(Bridge):
         domain: str = "https://open.feishu.cn",
         allowed_open_ids: list[str] | None = None,
         allowed_chat_ids: list[str] | None = None,
+        pairing_enabled: bool = False,
+        pairing_ttl_seconds: float = DEFAULT_TTL_SECONDS,
+        pairing_max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        pairing_code_length: int = DEFAULT_CODE_LENGTH,
+        pairing_state_path: str | Path = "data/feishu_paired_open_ids.json",
     ) -> None:
         super().__init__(manager)
         self.transport = transport
@@ -243,10 +262,30 @@ class FeishuBridge(Bridge):
         # Fail-closed allowlists: an empty/None open_id set means the
         # `_authorized` gate rejects EVERY sender and operator — there is no
         # implicit allow-all. A None chat set means "no group restriction".
-        self.allowed_open_ids: frozenset[str] = frozenset(allowed_open_ids or ())
+        # A plain (mutable) set, not frozenset: a successful `/pair` adds to
+        # it live (see _handle_pair_command) — no restart needed.
+        self.allowed_open_ids: set[str] = set(allowed_open_ids or ())
         self.allowed_chat_ids: frozenset[str] | None = (
             frozenset(allowed_chat_ids) if allowed_chat_ids else None
         )
+
+        # One-time pairing code onboarding (pairing.py) — off entirely when
+        # disabled, so `_on_message` falls straight through to the unchanged
+        # silent-reject behavior for every sender, `/pair` included.
+        self._pairing: PairingGate | None = None
+        if pairing_enabled:
+            self._pairing = PairingGate(
+                state_path=Path(pairing_state_path),
+                ttl_seconds=pairing_ttl_seconds,
+                max_attempts=pairing_max_attempts,
+                code_length=pairing_code_length,
+            )
+            # Union at load time only (README "Getting your open_id"): the
+            # persisted set is never written back merged with the env list,
+            # so removing an id from FEISHU_ALLOWED_OPEN_IDS and restarting
+            # still revokes it even though pairing state persists across
+            # restarts on its own.
+            self.allowed_open_ids |= self._pairing.paired_open_ids
 
         # Loopback (test fake server) must not have its outbound POSTs
         # hijacked by an ambient http_proxy (e.g. a system-wide proxy on a
@@ -361,7 +400,26 @@ class FeishuBridge(Bridge):
                     "Feishu bridge rollback after failed start also failed"
                 )
             raise
+        self._announce_pairing_code()
         logger.info("Feishu bridge started (transport=%s)", self.transport)
+
+    def _announce_pairing_code(self) -> None:
+        """Print the live pairing code to console stdout — ONLY here, ONLY
+        stdout, never through `logger` (see pairing.py module docstring for
+        why: this is meant to be the code's one and only appearance
+        anywhere). A no-op when pairing is off or the round is already
+        consumed/locked/expired (a hot restart-within-process, e.g. tests or
+        a supervised reload, shouldn't advertise a dead code)."""
+        if self._pairing is None or not self._pairing.active:
+            return
+        print(
+            f"\n[dsh-feishu-bridge] Pairing code: {self._pairing.code}\n"
+            f"Send '/pair {self._pairing.code}' to the bot in a PRIVATE chat "
+            "to get on the allowlist. Valid for "
+            f"{int(self._pairing.ttl_seconds)}s or {self._pairing.max_attempts} "
+            "wrong tries, whichever comes first.\n",
+            flush=True,
+        )
 
     async def _ensure_worker(self) -> None:
         """Bring the dedicated outbound worker (see __init__) to a known-live
@@ -813,12 +871,29 @@ class FeishuBridge(Bridge):
     async def _on_message(self, msg: "InboundMessage") -> None:
         chat_id = msg.chat_id
         sender = msg.sender_id
+        chat_type = msg.chat_type
+        # body_text strips the bot's own @-mention (groups); fall back to the
+        # full content for p2p where there's no mention to strip.
+        text = (msg.body_text or msg.content_text or "").strip()
+
+        # `/pair` is the one command reachable WITHOUT already being on the
+        # allowlist — that's its entire purpose (see pairing.py). Gated to
+        # private chats only: a code must never be typeable somewhere a
+        # third party in a group could read it, and this check runs before
+        # `_authorized` on purpose so a stranger can actually use it. Every
+        # other message from a stranger still falls through unchanged to the
+        # silent reject below.
+        command_token = text.split(maxsplit=1)[0].lower() if text else ""
+        if self._pairing is not None and chat_type != "group" and command_token == "/pair":
+            await self._handle_pair_command(chat_id, sender, text)
+            return
 
         if not self._authorized(sender):
-            # Log the open_id so the operator can discover their own id (the
-            # bot stays silent to an unauthorized tenant member — no presence
-            # leak, no spam). This is the documented "how do I get on the
-            # allowlist" path: send once, read it from the server log.
+            # Log the open_id so the operator can discover their own id if
+            # pairing is disabled (the bot stays silent to an unauthorized
+            # tenant member — no presence leak, no spam). See README
+            # "Getting your open_id" — /pair is the primary path, this log
+            # line is the documented fallback.
             logger.warning(
                 "Feishu: rejecting message from unauthorized open_id=%s (chat=%s)",
                 sender,
@@ -826,7 +901,6 @@ class FeishuBridge(Bridge):
             )
             return
 
-        chat_type = msg.chat_type
         if chat_type == "group":
             # Groups: only act on messages that @-mention the bot, and honor an
             # optional chat allowlist alongside the operator check.
@@ -855,9 +929,6 @@ class FeishuBridge(Bridge):
             )
             return
 
-        # body_text strips the bot's own @-mention (groups); fall back to the
-        # full content for p2p where there's no mention to strip.
-        text = (msg.body_text or msg.content_text or "").strip()
         if not text:
             await self._send_plain(chat_id, "Send me a message and I'll get to work.")
             return
@@ -870,6 +941,50 @@ class FeishuBridge(Bridge):
             self.manager.handle_incoming(self.name, chat_id, text, self),
             wait=False,
         )
+
+    async def _handle_pair_command(
+        self, chat_id: str, sender: str | None, text: str
+    ) -> None:
+        """`/pair <code>` — see pairing.py. Reachable from an UNauthorized
+        sender by design (`_on_message` routes here before `_authorized`);
+        every reply below is worded to give a stranger nothing beyond
+        "try again or give up", never a hint about *why* a code failed."""
+        assert self._pairing is not None
+        if not sender:
+            return
+        if sender in self.allowed_open_ids:
+            await self._send_plain(
+                chat_id, "You're already on the allowlist — no need to /pair."
+            )
+            return
+
+        parts = text.split(maxsplit=1)
+        code = parts[1].strip().upper() if len(parts) > 1 else ""
+        if not code:
+            await self._send_plain(
+                chat_id,
+                "Usage: /pair <code> — the code is printed on the bridge's "
+                "console at startup.",
+            )
+            return
+
+        outcome = await self._pairing.try_pair(sender, code)
+        if outcome == OUTCOME_OK:
+            self.allowed_open_ids.add(sender)
+            logger.info(
+                "Feishu: open_id=%s paired via /pair — added to allowlist", sender
+            )
+            await self._send_plain(
+                chat_id, "Paired! You're on the allowlist now — send me a message any time."
+            )
+        elif outcome == OUTCOME_INVALID:
+            await self._send_plain(chat_id, "Invalid pairing code.")
+        else:  # "expired" / "locked" / "consumed" — the round is over either way
+            await self._send_plain(
+                chat_id,
+                "Pairing isn't available right now — ask the operator to "
+                "restart the bridge for a new code.",
+            )
 
     # --- card actions (approval / session switch) ----------------------------
 

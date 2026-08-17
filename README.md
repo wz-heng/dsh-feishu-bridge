@@ -65,17 +65,28 @@ python -m dsh_feishu_bridge
 # or: dsh-feishu-bridge
 ```
 
-Message the bot in Feishu. First message from an unlisted `open_id` is silently rejected and logged — that log line is how you discover your own `open_id` to put in the allowlist (see "Getting your open_id" below).
+Message the bot in Feishu — from a **private chat**, send `/pair <code>` using the one-time code printed to the bridge's console at startup (see "Getting your open_id" below). A correct code puts your `open_id` on the allowlist immediately, no restart needed. Anything else from an unlisted `open_id` is silently rejected.
 
 ### Getting your open_id
 
-Send the bot a message once (it will not reply — this is expected, fail-closed). Check the server log for a line like:
+The bridge prints a one-time pairing code to its own console the moment it starts:
+
+```
+[dsh-feishu-bridge] Pairing code: 7K9XQPRT
+Send '/pair 7K9XQPRT' to the bot in a PRIVATE chat to get on the allowlist. Valid for 900s or 5 wrong tries, whichever comes first.
+```
+
+Message the bot **in a private (1:1) chat, not a group** — `/pair <code>` is deliberately not accepted in groups, so a code never has to travel through one. A correct code adds your `open_id` to the allowlist immediately (no restart) and persists it to `FEISHU_PAIRING_STATE_PATH` (default `data/feishu_paired_open_ids.json`, a `{"open_ids": [...]}` file) so it survives the next restart too. One code, one successful pairing, per process — restart the bridge to mint a fresh one; wrong guesses beyond `FEISHU_PAIRING_MAX_ATTEMPTS` (default 5) or past `FEISHU_PAIRING_TTL_SECONDS` (default 900s / 15 min) retire the round early. Turn the whole feature off with `FEISHU_PAIRING=0` if you'd rather manage the allowlist by hand.
+
+**Fallback: reading it off the log.** With pairing disabled (or if you'd rather not use it), send the bot any message once — it will not reply, this is expected, fail-closed — and check the server log for a line like:
 
 ```
 Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc_xxxx)
 ```
 
 Copy that `open_id` into `FEISHU_ALLOWED_OPEN_IDS` and restart.
+
+**Revoking access.** An env-configured id is revoked by removing it from `FEISHU_ALLOWED_OPEN_IDS` and restarting. A *paired* id is separate — remove it from `FEISHU_PAIRING_STATE_PATH`'s `open_ids` list (or delete the file) and restart.
 
 ## Install as a dsh plugin
 
@@ -127,6 +138,7 @@ This wrapper is v1: no build step (plain ESM under `lib/`), zero npm dependencie
 | `/quiet` | Only show replies (default) |
 | `/verbose` | Also show status/result lines |
 | `/help` | List commands |
+| `/pair <code>` | Onboard yourself onto the allowlist — the one command that works before you're on it; private chats only, see "Getting your open_id" |
 
 ## Remote tool approval
 
@@ -161,6 +173,11 @@ Everything is an environment variable. An optional YAML file (path via `DSH_FEIS
 | `FEISHU_DOMAIN` | `https://open.feishu.cn` | Change for Lark international / a proxy. |
 | `FEISHU_ALLOWED_OPEN_IDS` | *(empty)* | Comma-separated. **Required** — empty means nobody is authorized. |
 | `FEISHU_ALLOWED_CHAT_IDS` | *(empty = no restriction)* | Comma-separated group allowlist. |
+| `FEISHU_PAIRING` | `1` | `0`/`false` disables one-time pairing-code onboarding entirely — see "Getting your open_id". |
+| `FEISHU_PAIRING_TTL_SECONDS` | `900` | How long a pairing code stays valid after the bridge starts. |
+| `FEISHU_PAIRING_MAX_ATTEMPTS` | `5` | Wrong codes allowed before the round locks until restart. |
+| `FEISHU_PAIRING_CODE_LENGTH` | `8` | Pairing code length; must be at least 8 (boot failure otherwise). |
+| `FEISHU_PAIRING_STATE_PATH` | `data/feishu_paired_open_ids.json` | Where paired `open_id`s persist (`{"open_ids": [...]}`) — never the env allowlist, so removing an id from `FEISHU_ALLOWED_OPEN_IDS` still revokes it after a restart. |
 | `DSH_FEISHU_BRIDGE_HOST` | `0.0.0.0` | HTTP server bind address (health check + webhook route). |
 | `DSH_FEISHU_BRIDGE_PORT` | `8788` | HTTP server port. |
 
@@ -172,6 +189,7 @@ Everything is an environment variable. An optional YAML file (path via `DSH_FEIS
 - **Card buttons (session-switch, tool-approval) use one-time, identity-bound nonces.** A nonce is minted for one exact action + session (+ tool call, for approval); a second click, a replayed nonce, or a tampered card value is rejected without being honored.
 - **Sessions are owned by the chat that created them.** `/sessions` only lists (and `/switch` only accepts) sessions owned by the requesting chat — even between two allowlisted chats, one can't list or hijack another's session id and start receiving its replies. Tool-approval decisions apply the same ownership check server-side, not just via nonce scoping.
 - **Approval mode's callback server never leaves loopback.** It binds `127.0.0.1` on its own ephemeral port, separate from the public webhook/health port, and the address is only ever handed to the harness subprocess's own environment — never advertised anywhere a remote caller could reach it.
+- **The pairing code lives only on console stdout, the same trust boundary `.env` already sits in** — whoever can read the console can already edit the allowlist directly. It's printed once at startup and never appears in a log line again. Submissions are checked with a constant-time comparison, the code is single-use, it expires (`FEISHU_PAIRING_TTL_SECONDS`), and it locks after `FEISHU_PAIRING_MAX_ATTEMPTS` wrong guesses; `/pair` is silently ignored in group chats, and every reply a stranger can get from it gives them nothing about *why* a code failed beyond "wrong" or "no longer available."
 - Run this bridge's process with the least privilege the composition needs. The bundled default `dsh` composition (`examples/jsonrpc-agent` upstream) uses `danger-full-access` bash — run it in a disposable workspace/container, not against a machine you care about, whether or not you also turn on approval mode (the two are independent controls; see "Remote tool approval").
 
 ## Limitations (v1, by design)
@@ -182,6 +200,7 @@ These are deliberate scope decisions driven by what `deepseek-harness-sdk` v0.1 
 - **Sessions are sticky only within one bridge process.** A restart starts a fresh `DeepSeekHarness` subprocess, and cross-restart resume via a shared `session_root` isn't a behavior the SDK's v0.1 docs commit to — so this bridge doesn't build undocumented persistence on top of it. A chat's sticky session pointer and its `/quiet`/`/verbose` preference both reset on restart.
 - **Text messages only** — no voice, image, or file attachments, and no topic/thread replies (one sticky session per chat would silently cross wires across threads).
 - **One model configuration per bridge process** — provider/model/cordis composition are subprocess-wide, not per-chat. There's no `/agent`-style rebind command; run a second bridge process (different port, different Feishu app or allowlist) if you need a second configuration.
+- **One pairing code at a time, self-service only.** `/pair` can only add the *sender's own* `open_id` — there's no way to pair someone else's account for them, and only one code is ever live per process. A second person needing access waits for (or the operator triggers) a restart to get a fresh code.
 
 ## Development
 

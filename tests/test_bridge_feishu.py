@@ -64,6 +64,14 @@ def _settings(**over):
         feishu_domain="http://127.0.0.1:9",
         feishu_allowed_open_ids=["ou_me"],
         feishu_allowed_chat_ids=[],
+        # Off by default in this helper so the hundreds of tests that don't
+        # care about pairing never touch the filesystem or mint a code — see
+        # TestPairing for coverage with it explicitly turned on.
+        feishu_pairing_enabled=False,
+        feishu_pairing_ttl_seconds=900.0,
+        feishu_pairing_max_attempts=5,
+        feishu_pairing_code_length=8,
+        feishu_pairing_state_path="unused-pairing-state.json",
     )
     base.update(over)
     return SimpleNamespace(**base)
@@ -669,6 +677,195 @@ class TestInbound:
         await b._on_message(_inbound(text="", chat_type="group", mentioned_bot=True))
         b.manager.handle_incoming.assert_not_awaited()
         b._send.assert_awaited_once()
+
+
+# --------------------------------------------------------------------------
+# Pairing (/pair): one-time-code onboarding onto the allowlist (pairing.py)
+# --------------------------------------------------------------------------
+
+
+def _last_text(send_mock) -> str:
+    _, message = send_mock.await_args_list[-1].args
+    return message["text"]
+
+
+class TestPairing:
+    def _bridge(self, tmp_path, **over):
+        over.setdefault("feishu_pairing_state_path", tmp_path / "paired.json")
+        return _make_bridge(feishu_pairing_enabled=True, **over)
+
+    async def test_correct_code_pairs_immediately_and_persists(self, tmp_path):
+        b = self._bridge(tmp_path)
+        code = b._pairing.code
+        await b._on_message(_inbound(text=f"/pair {code}", sender="ou_new"))
+
+        assert "ou_new" in b.allowed_open_ids
+        assert _last_text(b._send) == (
+            "Paired! You're on the allowlist now — send me a message any time."
+        )
+        state = json.loads((tmp_path / "paired.json").read_text())
+        assert state == {"open_ids": ["ou_new"]}
+
+        # Effective immediately — no restart needed for a normal message to
+        # now route.
+        b.manager.handle_incoming.reset_mock()
+        await b._on_message(_inbound(text="hi", sender="ou_new"))
+        b.manager.handle_incoming.assert_awaited_once()
+
+    async def test_code_is_case_insensitive(self, tmp_path):
+        b = self._bridge(tmp_path)
+        code = b._pairing.code
+        await b._on_message(_inbound(text=f"/pair {code.lower()}", sender="ou_new"))
+        assert "ou_new" in b.allowed_open_ids
+
+    async def test_wrong_code_rejected_open_id_not_added(self, tmp_path):
+        b = self._bridge(tmp_path)
+        await b._on_message(_inbound(text="/pair WRONGCODE", sender="ou_new"))
+        assert "ou_new" not in b.allowed_open_ids
+        assert _last_text(b._send) == "Invalid pairing code."
+        b.manager.handle_incoming.assert_not_awaited()
+
+    async def test_max_attempts_locks_pairing_until_restart(self, tmp_path):
+        b = self._bridge(tmp_path, feishu_pairing_max_attempts=5)
+        for _ in range(5):
+            await b._on_message(_inbound(text="/pair WRONGCODE", sender="ou_new"))
+        assert b._pairing.active is False
+
+        # Even the CORRECT code no longer works once the round is locked.
+        code = b._pairing.code
+        await b._on_message(_inbound(text=f"/pair {code}", sender="ou_other"))
+        assert "ou_other" not in b.allowed_open_ids
+        assert "restart the bridge" in _last_text(b._send)
+
+    async def test_code_expires(self, tmp_path):
+        b = self._bridge(tmp_path, feishu_pairing_ttl_seconds=1.0)
+        code = b._pairing.code
+        b._pairing._minted_at -= 2.0  # simulate TTL elapsed, no global time patch
+
+        await b._on_message(_inbound(text=f"/pair {code}", sender="ou_new"))
+        assert "ou_new" not in b.allowed_open_ids
+        assert "restart the bridge" in _last_text(b._send)
+
+    async def test_successful_pair_cannot_be_replayed_for_a_second_open_id(self, tmp_path):
+        b = self._bridge(tmp_path)
+        code = b._pairing.code
+        await b._on_message(_inbound(text=f"/pair {code}", sender="ou_first"))
+        assert "ou_first" in b.allowed_open_ids
+
+        await b._on_message(_inbound(text=f"/pair {code}", sender="ou_second"))
+        assert "ou_second" not in b.allowed_open_ids
+        assert "restart the bridge" in _last_text(b._send)
+
+    async def test_group_chat_pair_not_entertained(self, tmp_path):
+        b = self._bridge(tmp_path)
+        code = b._pairing.code
+        await b._on_message(
+            _inbound(
+                text=f"/pair {code}",
+                sender="ou_stranger",
+                chat_type="group",
+                mentioned_bot=True,
+            )
+        )
+        assert "ou_stranger" not in b.allowed_open_ids
+        b._send.assert_not_awaited()
+        b.manager.handle_incoming.assert_not_awaited()
+
+    async def test_already_allowlisted_sender_gets_a_one_line_notice(self, tmp_path):
+        b = self._bridge(tmp_path)
+        await b._on_message(_inbound(text="/pair whatever", sender="ou_me"))
+        assert _last_text(b._send) == "You're already on the allowlist — no need to /pair."
+        b.manager.handle_incoming.assert_not_awaited()
+
+    async def test_missing_code_shows_usage(self, tmp_path):
+        b = self._bridge(tmp_path)
+        await b._on_message(_inbound(text="/pair", sender="ou_new"))
+        assert _last_text(b._send).startswith("Usage: /pair <code>")
+
+    async def test_pairing_disabled_restores_silent_rejection(self):
+        b = _make_bridge(feishu_pairing_enabled=False)
+        await b._on_message(_inbound(text="/pair XXXXXXXX", sender="ou_stranger"))
+        b._send.assert_not_awaited()
+        b.manager.handle_incoming.assert_not_awaited()
+        assert "ou_stranger" not in b.allowed_open_ids
+
+    async def test_code_never_appears_in_a_log_line(self, tmp_path, caplog):
+        caplog.set_level("DEBUG")
+        b = self._bridge(tmp_path)
+        code = b._pairing.code
+        await b._on_message(_inbound(text=f"/pair {code}", sender="ou_new"))
+        await b._on_message(_inbound(text="/pair WRONGCODE", sender="ou_other"))
+        for record in caplog.records:
+            assert code not in record.getMessage()
+
+    def test_env_and_persisted_allowlists_are_unioned_at_boot(self, tmp_path):
+        state_path = tmp_path / "paired.json"
+        state_path.write_text(json.dumps({"open_ids": ["ou_previously_paired"]}))
+        b = _make_bridge(
+            feishu_pairing_enabled=True,
+            feishu_pairing_state_path=state_path,
+            feishu_allowed_open_ids=["ou_env"],
+        )
+        assert b.allowed_open_ids == {"ou_env", "ou_previously_paired"}
+
+    async def test_new_pairing_persists_across_restart_and_env_removal_still_revokes(
+        self, tmp_path
+    ):
+        state_path = tmp_path / "paired.json"
+        b1 = _make_bridge(
+            feishu_pairing_enabled=True,
+            feishu_pairing_state_path=state_path,
+            feishu_allowed_open_ids=["ou_env"],
+        )
+        code = b1._pairing.code
+        await b1._on_message(_inbound(text=f"/pair {code}", sender="ou_new"))
+        assert "ou_new" in b1.allowed_open_ids
+
+        # "Restart": a fresh bridge over the same state file, with ou_env
+        # dropped from the env allowlist.
+        b2 = _make_bridge(
+            feishu_pairing_enabled=True,
+            feishu_pairing_state_path=state_path,
+            feishu_allowed_open_ids=[],
+        )
+        assert b2.allowed_open_ids == {"ou_new"}  # persisted id survives the restart
+        assert "ou_env" not in b2.allowed_open_ids  # revoked by dropping it from env
+
+    def test_corrupt_state_file_treated_as_empty_not_a_boot_failure(self, tmp_path):
+        state_path = tmp_path / "paired.json"
+        state_path.write_text("not json")
+        b = _make_bridge(feishu_pairing_enabled=True, feishu_pairing_state_path=state_path)
+        assert b.allowed_open_ids == {"ou_me"}  # only the env id; pairing set starts empty
+
+    def test_missing_state_file_starts_empty(self, tmp_path):
+        b = _make_bridge(
+            feishu_pairing_enabled=True,
+            feishu_pairing_state_path=tmp_path / "does-not-exist.json",
+        )
+        assert b._pairing.paired_open_ids == set()
+
+    def test_pairing_disabled_by_default_in_direct_construction(self):
+        # FeishuBridge's own default (not build_feishu_bridge's, which reads
+        # settings.feishu_pairing_enabled — see config.py's True default).
+        assert _make_bridge(feishu_pairing_enabled=False)._pairing is None
+
+    def test_announce_pairing_code_prints_to_stdout(self, tmp_path, capsys):
+        b = self._bridge(tmp_path)
+        b._announce_pairing_code()
+        out = capsys.readouterr().out
+        assert b._pairing.code in out
+        assert "/pair" in out
+
+    def test_announce_pairing_code_silent_when_disabled(self, capsys):
+        b = _make_bridge(feishu_pairing_enabled=False)
+        b._announce_pairing_code()
+        assert capsys.readouterr().out == ""
+
+    def test_announce_pairing_code_silent_once_consumed(self, tmp_path, capsys):
+        b = self._bridge(tmp_path)
+        b._pairing._consumed = True
+        b._announce_pairing_code()
+        assert capsys.readouterr().out == ""
 
 
 # --------------------------------------------------------------------------

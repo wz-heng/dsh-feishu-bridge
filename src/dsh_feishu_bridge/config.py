@@ -61,6 +61,15 @@ class Settings:
     feishu_allowed_open_ids: list[str] = field(default_factory=list)
     feishu_allowed_chat_ids: list[str] = field(default_factory=list)
 
+    # One-time pairing code onboarding (README "Getting your open_id",
+    # pairing.py). On by default — a fresh deploy should be onboardable
+    # without ever reading a log or restarting the process.
+    feishu_pairing_enabled: bool = True
+    feishu_pairing_ttl_seconds: float = 900.0
+    feishu_pairing_max_attempts: int = 5
+    feishu_pairing_code_length: int = 8
+    feishu_pairing_state_path: str = "data/feishu_paired_open_ids.json"
+
     # dsh
     deepseek_api_key: str | None = None
     deepseek_base_url: str | None = None
@@ -100,6 +109,27 @@ def load_settings(config_path: str | Path | None = None) -> Settings:
 
 
 def _validate(settings: Settings) -> None:
+    if settings.feishu_pairing_enabled:
+        # A code shorter than 8 chars from a 32-symbol alphabet (see
+        # pairing.py) is small enough that MAX_ATTEMPTS-bounded guessing
+        # stops being the only realistic risk — refuse to boot rather than
+        # silently run a weaker gate than the one the README documents.
+        if settings.feishu_pairing_code_length < 8:
+            raise ConfigError(
+                "FEISHU_PAIRING_CODE_LENGTH must be at least 8 "
+                f"(got {settings.feishu_pairing_code_length})."
+            )
+        if settings.feishu_pairing_max_attempts < 1:
+            raise ConfigError(
+                "FEISHU_PAIRING_MAX_ATTEMPTS must be at least 1 "
+                f"(got {settings.feishu_pairing_max_attempts})."
+            )
+        if settings.feishu_pairing_ttl_seconds <= 0:
+            raise ConfigError(
+                "FEISHU_PAIRING_TTL_SECONDS must be positive "
+                f"(got {settings.feishu_pairing_ttl_seconds})."
+            )
+
     if settings.dsh_approval_mode and settings.dsh_cordis:
         # Approval mode ships its own composition (bundled cordis.yml, see
         # approval_runtime/) that a caller-supplied one would silently
@@ -137,6 +167,23 @@ def _apply_yaml(settings: Settings, data: dict[str, Any]) -> None:
         feishu.get("allowed_chat_ids", settings.feishu_allowed_chat_ids)
     )
 
+    pairing = feishu.get("pairing") or {}
+    settings.feishu_pairing_enabled = _coerce_bool(
+        pairing.get("enabled", settings.feishu_pairing_enabled), settings.feishu_pairing_enabled
+    )
+    settings.feishu_pairing_ttl_seconds = float(
+        pairing.get("ttl_seconds", settings.feishu_pairing_ttl_seconds)
+    )
+    settings.feishu_pairing_max_attempts = int(
+        pairing.get("max_attempts", settings.feishu_pairing_max_attempts)
+    )
+    settings.feishu_pairing_code_length = int(
+        pairing.get("code_length", settings.feishu_pairing_code_length)
+    )
+    settings.feishu_pairing_state_path = pairing.get(
+        "state_path", settings.feishu_pairing_state_path
+    )
+
     dsh = data.get("dsh") or {}
     settings.dsh_provider = dsh.get("provider", settings.dsh_provider)
     settings.dsh_model = dsh.get("model", settings.dsh_model)
@@ -170,6 +217,18 @@ def _apply_env(settings: Settings) -> None:
         settings.feishu_allowed_open_ids = _split_csv(env["FEISHU_ALLOWED_OPEN_IDS"])
     if "FEISHU_ALLOWED_CHAT_IDS" in env:
         settings.feishu_allowed_chat_ids = _split_csv(env["FEISHU_ALLOWED_CHAT_IDS"])
+
+    if "FEISHU_PAIRING" in env:
+        settings.feishu_pairing_enabled = _parse_bool(env["FEISHU_PAIRING"])
+    if "FEISHU_PAIRING_TTL_SECONDS" in env:
+        settings.feishu_pairing_ttl_seconds = float(env["FEISHU_PAIRING_TTL_SECONDS"])
+    if "FEISHU_PAIRING_MAX_ATTEMPTS" in env:
+        settings.feishu_pairing_max_attempts = int(env["FEISHU_PAIRING_MAX_ATTEMPTS"])
+    if "FEISHU_PAIRING_CODE_LENGTH" in env:
+        settings.feishu_pairing_code_length = int(env["FEISHU_PAIRING_CODE_LENGTH"])
+    settings.feishu_pairing_state_path = env.get(
+        "FEISHU_PAIRING_STATE_PATH", settings.feishu_pairing_state_path
+    )
 
     settings.deepseek_api_key = env.get("DEEPSEEK_API_KEY", settings.deepseek_api_key)
     # `or` on purpose, not `.get(key, default)`: an env referencing an

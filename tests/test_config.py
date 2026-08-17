@@ -11,6 +11,9 @@ def clean_env(monkeypatch):
         "FEISHU_APP_ID", "FEISHU_APP_SECRET", "FEISHU_TRANSPORT",
         "FEISHU_VERIFICATION_TOKEN", "FEISHU_ENCRYPT_KEY", "FEISHU_DOMAIN",
         "FEISHU_ALLOWED_OPEN_IDS", "FEISHU_ALLOWED_CHAT_IDS",
+        "FEISHU_PAIRING", "FEISHU_PAIRING_TTL_SECONDS",
+        "FEISHU_PAIRING_MAX_ATTEMPTS", "FEISHU_PAIRING_CODE_LENGTH",
+        "FEISHU_PAIRING_STATE_PATH",
         "DEEPSEEK_API_KEY", "DEEPSEEK_BASE_URL", "DSH_PROVIDER", "DSH_MODEL",
         "DSH_MAX_TOKENS", "DSH_CORDIS", "DSH_SESSION_ROOT", "DSH_WORKSPACE",
         "DSH_APPROVAL_MODE", "DSH_APPROVAL_TIMEOUT_SECONDS",
@@ -32,6 +35,11 @@ def test_defaults(clean_env):
     assert s.port == 8788
     assert s.dsh_approval_mode is False
     assert s.dsh_approval_timeout_seconds == 60.0
+    assert s.feishu_pairing_enabled is True
+    assert s.feishu_pairing_ttl_seconds == 900.0
+    assert s.feishu_pairing_max_attempts == 5
+    assert s.feishu_pairing_code_length == 8
+    assert s.feishu_pairing_state_path == "data/feishu_paired_open_ids.json"
 
 
 def test_env_vars_applied(clean_env):
@@ -134,4 +142,69 @@ class TestApprovalMode:
         clean_env.setenv("DSH_APPROVAL_MODE", "1")
         clean_env.setenv("DSH_CORDIS", "/some/custom/cordis.yml")
         with pytest.raises(ConfigError, match="DSH_APPROVAL_MODE"):
+            load_settings()
+
+
+class TestPairingConfig:
+    def test_env_vars_applied(self, clean_env):
+        clean_env.setenv("FEISHU_PAIRING", "0")
+        clean_env.setenv("FEISHU_PAIRING_TTL_SECONDS", "60")
+        clean_env.setenv("FEISHU_PAIRING_MAX_ATTEMPTS", "3")
+        clean_env.setenv("FEISHU_PAIRING_CODE_LENGTH", "10")
+        clean_env.setenv("FEISHU_PAIRING_STATE_PATH", "/tmp/custom-paired.json")
+        s = load_settings()
+        assert s.feishu_pairing_enabled is False
+        assert s.feishu_pairing_ttl_seconds == 60.0
+        assert s.feishu_pairing_max_attempts == 3
+        assert s.feishu_pairing_code_length == 10
+        assert s.feishu_pairing_state_path == "/tmp/custom-paired.json"
+
+    def test_yaml_applied(self, clean_env, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "feishu:\n"
+            "  pairing:\n"
+            "    enabled: false\n"
+            "    ttl_seconds: 120\n"
+            "    max_attempts: 2\n"
+            "    code_length: 9\n"
+            "    state_path: custom/paired.json\n"
+        )
+        s = load_settings(config_file)
+        assert s.feishu_pairing_enabled is False
+        assert s.feishu_pairing_ttl_seconds == 120.0
+        assert s.feishu_pairing_max_attempts == 2
+        assert s.feishu_pairing_code_length == 9
+        assert s.feishu_pairing_state_path == "custom/paired.json"
+
+    def test_yaml_quoted_false_string_is_not_truthy(self, clean_env, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text('feishu:\n  pairing:\n    enabled: "false"\n')
+        assert load_settings(config_file).feishu_pairing_enabled is False
+
+    def test_env_wins_over_yaml(self, clean_env, tmp_path):
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("feishu:\n  pairing:\n    enabled: false\n")
+        clean_env.setenv("FEISHU_PAIRING", "1")
+        assert load_settings(config_file).feishu_pairing_enabled is True
+
+    @pytest.mark.parametrize("length", [1, 7])
+    def test_code_length_below_floor_is_boot_failure(self, clean_env, length):
+        clean_env.setenv("FEISHU_PAIRING_CODE_LENGTH", str(length))
+        with pytest.raises(ConfigError, match="FEISHU_PAIRING_CODE_LENGTH"):
+            load_settings()
+
+    def test_code_length_floor_does_not_apply_when_pairing_disabled(self, clean_env):
+        clean_env.setenv("FEISHU_PAIRING", "0")
+        clean_env.setenv("FEISHU_PAIRING_CODE_LENGTH", "1")
+        load_settings()  # must not raise
+
+    def test_zero_max_attempts_is_boot_failure(self, clean_env):
+        clean_env.setenv("FEISHU_PAIRING_MAX_ATTEMPTS", "0")
+        with pytest.raises(ConfigError, match="FEISHU_PAIRING_MAX_ATTEMPTS"):
+            load_settings()
+
+    def test_non_positive_ttl_is_boot_failure(self, clean_env):
+        clean_env.setenv("FEISHU_PAIRING_TTL_SECONDS", "0")
+        with pytest.raises(ConfigError, match="FEISHU_PAIRING_TTL_SECONDS"):
             load_settings()

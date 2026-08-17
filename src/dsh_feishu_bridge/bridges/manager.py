@@ -20,6 +20,11 @@ BRIDGE_COMMANDS = {
     "/quiet": "Show only the agent's replies (hide tool activity)",
     "/verbose": "Also show tool activity (result, status)",
     "/help": "Show available commands",
+    # Handled entirely in FeishuBridge._handle_pair_command, before this
+    # manager ever sees the message (see pairing.py) — listed here purely so
+    # an already-paired sender sees it in /help. Not routed through
+    # _handle_command below.
+    "/pair": "Onboard onto the allowlist with the console-printed code (private chats only)",
 }
 
 
