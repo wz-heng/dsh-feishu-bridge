@@ -18,6 +18,10 @@ SDK 金丝雀每天对 `deepseek-harness-sdk`、`lark-channel-sdk` 的**最新**
 
 ## 截图
 
+![远程工具审批：bash 请求执行，飞书里直接 Allow / Deny](docs/screenshots/chat-approval-card.png)
+
+![批准后命令执行，回复返回](docs/screenshots/chat-approval-done.png)
+
 ![飞书里的真实一轮：agent 读取工作目录并概括文件](docs/screenshots/chat-agent-turn.png)
 
 ![默认 fail-closed：启动、拒绝、加白、回复](docs/screenshots/fail-closed-boot.png)

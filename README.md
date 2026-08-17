@@ -18,6 +18,10 @@ A Feishu (Lark) channel bridge for [DeepSeek Harness](https://github.com/deepsee
 
 ## Screenshots
 
+![Remote tool approval: bash wants to run, Allow / Deny right in Feishu](docs/screenshots/chat-approval-card.png)
+
+![Approved — the command runs and the reply comes back](docs/screenshots/chat-approval-done.png)
+
 ![A real turn in Feishu: the agent reads the workspace and summarizes a file](docs/screenshots/chat-agent-turn.png)
 
 ![Fail-closed by default: boot, reject, allowlist, reply](docs/screenshots/fail-closed-boot.png)
