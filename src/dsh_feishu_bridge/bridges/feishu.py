@@ -877,14 +877,19 @@ class FeishuBridge(Bridge):
         text = (msg.body_text or msg.content_text or "").strip()
 
         # `/pair` is the one command reachable WITHOUT already being on the
-        # allowlist — that's its entire purpose (see pairing.py). Gated to
-        # private chats only: a code must never be typeable somewhere a
-        # third party in a group could read it, and this check runs before
-        # `_authorized` on purpose so a stranger can actually use it. Every
-        # other message from a stranger still falls through unchanged to the
-        # silent reject below.
+        # allowlist — that's its entire purpose (see pairing.py). It's
+        # UNIFORMLY not entertained in a group chat, for anyone: a code must
+        # never be typeable somewhere a third party could read it, so this
+        # returns silently rather than letting an already-allowlisted
+        # sender's /pair fall through to the manager's normal command
+        # dispatch (which would otherwise reply "Unknown command: /pair").
+        # In a private chat this check runs before `_authorized` on purpose
+        # so a stranger can actually use it. Every other message from a
+        # stranger still falls through unchanged to the silent reject below.
         command_token = text.split(maxsplit=1)[0].lower() if text else ""
-        if self._pairing is not None and chat_type != "group" and command_token == "/pair":
+        if self._pairing is not None and command_token == "/pair":
+            if chat_type == "group":
+                return
             await self._handle_pair_command(chat_id, sender, text)
             return
 

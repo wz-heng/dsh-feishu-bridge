@@ -5,7 +5,10 @@ test_bridge_feishu.py::TestPairing for the bridge-integration coverage:
 
 from __future__ import annotations
 
+import asyncio
 import json
+
+import pytest
 
 from dsh_feishu_bridge.pairing import (
     OUTCOME_CONSUMED,
@@ -120,3 +123,37 @@ class TestPairingGate:
         path.write_text(json.dumps({"open_ids": ["ou_old"]}))
         gate = self._gate(tmp_path, state_path=path)
         assert gate.paired_open_ids == {"ou_old"}
+
+    async def test_concurrent_correct_submissions_only_one_succeeds(self, tmp_path):
+        """Snape: try_pair's only await (the disk write) used to sit BETWEEN
+        the `_consumed` check and setting it — two concurrent submissions of
+        the correct code could both pass the check before either write
+        finished, both "succeed", and the one-time code would have paired
+        two different open_ids. The whole method is now lock-serialized."""
+        gate = self._gate(tmp_path)
+        outcomes = await asyncio.gather(
+            gate.try_pair("ou_a", gate.code),
+            gate.try_pair("ou_b", gate.code),
+        )
+        assert sorted(outcomes) == sorted([OUTCOME_OK, OUTCOME_CONSUMED])
+        assert gate.paired_open_ids in ({"ou_a"}, {"ou_b"})  # exactly one winner
+
+    async def test_write_failure_does_not_consume_the_code(self, tmp_path):
+        """Snape's repro: point state_path at a directory so the write
+        raises IsADirectoryError. Before the fix, `_consumed` was set
+        BEFORE the write — the code was burned even though nobody actually
+        got paired. Now the round must survive to be retried."""
+        state_path = tmp_path / "not-a-file"
+        state_path.mkdir()
+        gate = PairingGate(state_path=state_path, max_attempts=5)
+
+        with pytest.raises(OSError):
+            await gate.try_pair("ou_a", gate.code)
+
+        assert gate.active is True
+        assert gate.paired_open_ids == set()
+
+        # A retry (e.g. after the operator fixes the path) can still work —
+        # nothing about the round was invalidated by the failed attempt.
+        state_path.rmdir()
+        assert await gate.try_pair("ou_a", gate.code) == OUTCOME_OK

@@ -129,6 +129,13 @@ class PairingGate:
         self._attempts = 0
         self._locked = False
         self._consumed = False
+        # Guards the whole check-then-commit sequence in try_pair: the disk
+        # write below is the only await in that sequence, so without this
+        # lock two concurrent submissions of the CORRECT code could both
+        # pass the (still-False) `_consumed` check before either write
+        # finishes, and both go on to "succeed" — a one-time code used
+        # twice. Serializing the method closes that window; see try_pair.
+        self._lock = asyncio.Lock()
         # Ids from previous successful pairings ONLY — never the env
         # allowlist (the caller unions the two in memory; this set is what
         # gets written back to state_path).
@@ -150,31 +157,42 @@ class PairingGate:
         Returns one of the ``OUTCOME_*`` constants; never raises on bad
         input, and never logs `submitted_code` or `self.code` on any path —
         the printed console line is the code's only appearance anywhere.
+
+        The whole check-then-commit sequence runs under `self._lock`. Two
+        reasons, both found by review rather than a passing test suite:
+        concurrent submissions of the correct code must not both succeed
+        (only one `await` — the disk write — sits between the check and the
+        commit, which is exactly the window a lock needs to close), and a
+        failed write must not burn the one-time code: `_consumed` /
+        `paired_open_ids` are only updated AFTER `_write_paired_open_ids`
+        returns, so a write error (disk full, bad permissions) propagates
+        with the round still active for a retry, instead of silently
+        locking a user out with nothing to show for it.
         """
-        if self._consumed:
-            return OUTCOME_CONSUMED
-        if self._locked:
-            return OUTCOME_LOCKED
-        if self._expired:
-            return OUTCOME_EXPIRED
+        async with self._lock:
+            if self._consumed:
+                return OUTCOME_CONSUMED
+            if self._locked:
+                return OUTCOME_LOCKED
+            if self._expired:
+                return OUTCOME_EXPIRED
 
-        # Constant-time: a naive `==` short-circuits on the first mismatched
-        # character, letting a network-timing attacker recover the code
-        # position by position.
-        if hmac.compare_digest(self.code, submitted_code):
-            self._consumed = True
-            self.paired_open_ids.add(open_id)
-            await asyncio.to_thread(
-                _write_paired_open_ids, self._state_path, frozenset(self.paired_open_ids)
-            )
-            return OUTCOME_OK
+            # Constant-time: a naive `==` short-circuits on the first
+            # mismatched character, letting a network-timing attacker
+            # recover the code position by position.
+            if hmac.compare_digest(self.code, submitted_code):
+                updated = frozenset(self.paired_open_ids | {open_id})
+                await asyncio.to_thread(_write_paired_open_ids, self._state_path, updated)
+                self._consumed = True
+                self.paired_open_ids.add(open_id)
+                return OUTCOME_OK
 
-        self._attempts += 1
-        if self._attempts >= self.max_attempts:
-            self._locked = True
-            logger.warning(
-                "Feishu pairing: %d invalid attempts reached — pairing locked "
-                "until the bridge restarts",
-                self.max_attempts,
-            )
-        return OUTCOME_INVALID
+            self._attempts += 1
+            if self._attempts >= self.max_attempts:
+                self._locked = True
+                logger.warning(
+                    "Feishu pairing: %d invalid attempts reached — pairing "
+                    "locked until the bridge restarts",
+                    self.max_attempts,
+                )
+            return OUTCOME_INVALID

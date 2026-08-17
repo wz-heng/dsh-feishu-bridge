@@ -771,6 +771,25 @@ class TestPairing:
         b._send.assert_not_awaited()
         b.manager.handle_incoming.assert_not_awaited()
 
+    async def test_group_chat_pair_not_entertained_even_for_an_already_allowlisted_sender(
+        self, tmp_path
+    ):
+        # Snape: an authorized sender's /pair in a group must not fall
+        # through to the manager's normal command dispatch (which would
+        # otherwise reply "Unknown command: /pair") — /pair is silently
+        # unavailable in groups, full stop, not just for strangers.
+        b = self._bridge(tmp_path)
+        await b._on_message(
+            _inbound(
+                text="/pair whatever",
+                sender="ou_me",
+                chat_type="group",
+                mentioned_bot=True,
+            )
+        )
+        b._send.assert_not_awaited()
+        b.manager.handle_incoming.assert_not_awaited()
+
     async def test_already_allowlisted_sender_gets_a_one_line_notice(self, tmp_path):
         b = self._bridge(tmp_path)
         await b._on_message(_inbound(text="/pair whatever", sender="ou_me"))
