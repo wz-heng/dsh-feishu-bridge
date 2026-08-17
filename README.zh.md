@@ -130,7 +130,7 @@ Feishu: rejecting message from unauthorized open_id=ou_xxxxxxxxxxxxxxxx (chat=oc
 
 ## 远程工具审批
 
-据我们所知，这是唯一带远程工具审批流程的 `dsh` 飞书桥——大多数桥只是聊天转发器，模型要什么就直接跑。
+给 agent 的工具执行加一道人工闸门：模型想跑的命令，没人在飞书上点头就不会执行。
 
 设置 `DSH_APPROVAL_MODE=1` 开启后，agent 每次调用 `bash` 都会阻塞，直到有人在飞书上给会话属主聊天推送的卡片上点 **同意** 或 **拒绝**，并且**超时 fail-closed**（`DSH_APPROVAL_TIMEOUT_SECONDS`，默认 60 秒——卡片超时没人处理是拒绝，绝不会默认放行）。默认关闭，不影响现有部署。
 

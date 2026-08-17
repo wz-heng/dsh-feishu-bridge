@@ -130,7 +130,7 @@ This wrapper is v1: no build step (plain ESM under `lib/`), zero npm dependencie
 
 ## Remote tool approval
 
-As far as we know, this is the only `dsh` Feishu bridge with a remote tool-approval flow — most bridges are chat forwarders that run whatever the model asks for.
+A human-in-the-loop gate on agent tool execution: nothing the model asks to run executes until someone explicitly allows it from Feishu.
 
 Opt in with `DSH_APPROVAL_MODE=1` and every `bash` call the agent makes blocks until a human taps **Allow** or **Deny** on a Feishu card sent to the session's owning chat, with a **fail-closed timeout** (`DSH_APPROVAL_TIMEOUT_SECONDS`, default 60s — a card nobody answers in time is denied, never allowed). Off by default; existing deployments are unaffected.
 
