@@ -122,6 +122,28 @@ def test_new_shape_raises_on_unsupported_custom_cordis(monkeypatch):
         _build_harness_config(config)
 
 
+def test_new_shape_drops_cordis_silently_when_patches_supplies_the_equivalent(monkeypatch):
+    # This is exactly app.py's approval-mode wiring: it always sets BOTH
+    # cordis (bundled_cordis_path(), for the old shape) and patches
+    # (bundled_approval_patch_path(), for the new shape) on the same
+    # DshAdapterConfig and lets capability detection pick the one the
+    # installed SDK actually supports. On the new shape, cordis has no
+    # field to land in — but unlike the bare-cordis case above, there IS a
+    # new-shape equivalent already supplied via patches, so this must NOT
+    # raise (caught live by the SDK canary against 0.1.2a3: the old code
+    # raised unconditionally here, breaking approval mode on any new-shape
+    # SDK even though patches was already wired correctly).
+    monkeypatch.setattr(dsh_adapter_module, "DeepSeekHarnessConfig", _NewShapeConfig)
+    config = DshAdapterConfig(
+        cordis="/tmp/cordis.yml", patches=("/tmp/approval.patch.yml",)
+    )
+
+    built = _build_harness_config(config)
+
+    assert built.patches == ("/tmp/approval.patch.yml",)
+    assert not hasattr(built, "cordis")
+
+
 def test_field_probe_is_cached(monkeypatch):
     monkeypatch.setattr(dsh_adapter_module, "DeepSeekHarnessConfig", _OldShapeConfig)
     _build_harness_config(DshAdapterConfig())

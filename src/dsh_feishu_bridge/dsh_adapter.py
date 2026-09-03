@@ -219,11 +219,18 @@ def _build_harness_config(config: DshAdapterConfig) -> DeepSeekHarnessConfig:
 
     if "cordis" in fields:
         kwargs["cordis"] = config.cordis
-    elif config.cordis is not None:
+    elif config.cordis is not None and not config.patches:
         # A caller-supplied full-composition override has no equivalent on
         # this SDK shape — silently dropping it would silently downgrade
         # whatever behavior (e.g. approval mode's fail-closed gate) that
         # composition was providing. Refuse instead.
+        #
+        # When `patches` IS set alongside `cordis`, the caller (app.py's
+        # approval-mode wiring) has already supplied the new-shape
+        # equivalent composition — `cordis` here is just the OLD-shape
+        # artifact carried along for whichever SDK turns out to be
+        # installed, not a request we can't honor. Drop it silently in
+        # that case; only `patches` below is applied.
         raise DshAdapterError(
             f"DSH_CORDIS is set to {config.cordis!r}, but the installed "
             "deepseek-harness-sdk no longer accepts a `cordis` kwarg (see "
