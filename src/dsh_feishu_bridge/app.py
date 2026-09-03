@@ -80,6 +80,7 @@ def build_app(settings: Settings) -> FastAPI:
     env: dict[str, str] = {}
     cordis = settings.dsh_cordis
     patches: tuple[str, ...] = ()
+    cordis_has_patches_fallback = False
     if settings.dsh_approval_mode:
         if settings.dsh_cordis:
             # load_settings() already rejects this combination (config.py) —
@@ -94,9 +95,15 @@ def build_app(settings: Settings) -> FastAPI:
         # field set decides which one lands on the wire
         # (dsh_adapter._build_harness_config) — cordis (full composition)
         # on the old shape, patches (overlay) on the new one. See
-        # approval_runtime/__init__.py.
+        # approval_runtime/__init__.py. cordis_has_patches_fallback tells
+        # _build_harness_config these two specific artifacts provide the
+        # SAME behavior, so dropping cordis on a new-shape SDK (in favor of
+        # patches) is safe rather than an unrecoverable loss (Snape review,
+        # 2026-09-03 — this must be an explicit declaration, not inferred
+        # from `patches` merely being non-empty).
         cordis = str(bundled_cordis_path())
         patches = (str(bundled_approval_patch_path()),)
+        cordis_has_patches_fallback = True
 
     adapter = DshAdapter(
         DshAdapterConfig(
@@ -109,6 +116,7 @@ def build_app(settings: Settings) -> FastAPI:
             session_root=settings.dsh_session_root,
             cordis=cordis,
             patches=patches,
+            cordis_has_patches_fallback=cordis_has_patches_fallback,
             env=env,
         )
     )

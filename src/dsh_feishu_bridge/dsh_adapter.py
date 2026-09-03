@@ -162,6 +162,17 @@ class DshAdapterConfig:
     # an SDK old enough that `cordis` alone is still the full-composition
     # mechanism.
     patches: tuple[str, ...] = ()
+    # True only when `patches` is a genuine functional equivalent of
+    # `cordis` for THIS specific composition (set by app.py's approval-mode
+    # wiring: cordis.yml and approval.patch.yml both provide the exact same
+    # approval behavior, just on different SDK shapes). `_build_harness_config`
+    # uses this — not `bool(patches)` — to decide whether dropping `cordis`
+    # on a new-shape SDK is safe; a caller that happens to set both
+    # `cordis` and an UNRELATED `patches` (there is no such caller today,
+    # but the dataclass doesn't prevent one) still gets the fail-loud
+    # DshAdapterError, since an unrelated patches tuple proves nothing about
+    # cordis having an equivalent (Snape review, 2026-09-03).
+    cordis_has_patches_fallback: bool = False
     request_timeout_seconds: float | None = 300.0
     env: dict[str, str] = field(default_factory=dict)
 
@@ -192,6 +203,39 @@ def _default_dsh_home(cwd: str | None) -> str:
     return str(base.resolve() / _DEFAULT_DSH_HOME_DIRNAME)
 
 
+def _session_root_as_dsh_home(session_root: str, cwd: str | None) -> str:
+    """Map a configured ``session_root`` onto the new SDK's ``dsh_home``,
+    preserving the OLD SDK's effective relative-path resolution rather than
+    forwarding the string verbatim (Snape review, 2026-09-03: verified
+    against both installed SDK sources — real regression risk, not
+    theoretical).
+
+    On the old shape, ``session_root`` is never resolved by the SDK at all:
+    it's passed straight through as the ``DSH_SESSION_ROOT`` env var into
+    the runtime subprocess (``deepseek_harness.api``), whose own cwd is
+    ``config.cwd`` resolved (``runtime_cwd`` in that same module) — so a
+    relative ``session_root`` lands under ``config.cwd``, via the bundled
+    ``cordis.yml``'s ``root: !!js process.env.DSH_SESSION_ROOT ?? './.sessions'``.
+    On the new shape, ``dsh_home`` IS resolved by the SDK itself, but
+    against the Python *bridge* process's own cwd
+    (``Path(self.config.dsh_home).expanduser().resolve()`` in
+    ``deepseek_harness.client``) — a different directory than
+    ``config.cwd`` whenever the bridge is launched from somewhere other
+    than the configured dsh workspace (``DSH_WORKSPACE``/``dsh_workspace``
+    is an independent, user-configurable setting — see config.py). Passing
+    a relative ``session_root`` straight through would silently relocate
+    (and, in effect, lose) existing sessions on any deployment where those
+    two directories differ. Resolving here, against the same ``cwd`` the
+    old shape implicitly used, keeps the location identical across both
+    SDK shapes.
+    """
+    path = Path(session_root)
+    if path.is_absolute():
+        return session_root
+    base = Path(cwd) if cwd else Path.cwd()
+    return str((base / path).resolve())
+
+
 def _build_harness_config(config: DshAdapterConfig) -> DeepSeekHarnessConfig:
     """Translate :class:`DshAdapterConfig` into the installed SDK's actual
     ``DeepSeekHarnessConfig`` shape (see module docstring's "SDK-version
@@ -214,23 +258,32 @@ def _build_harness_config(config: DshAdapterConfig) -> DeepSeekHarnessConfig:
         kwargs["session_root"] = config.session_root
     if "dsh_home" in fields:
         # Mandatory on this SDK shape — never omit it, even when the caller
-        # never configured session_root (see _default_dsh_home).
-        kwargs["dsh_home"] = config.session_root or _default_dsh_home(config.cwd)
+        # never configured session_root (see _default_dsh_home). When
+        # session_root IS configured, resolve it the same way the OLD
+        # shape's runtime subprocess implicitly did (relative to
+        # config.cwd), not verbatim — see _session_root_as_dsh_home for why
+        # that distinction matters (Snape review, 2026-09-03).
+        kwargs["dsh_home"] = (
+            _session_root_as_dsh_home(config.session_root, config.cwd)
+            if config.session_root
+            else _default_dsh_home(config.cwd)
+        )
 
     if "cordis" in fields:
         kwargs["cordis"] = config.cordis
-    elif config.cordis is not None and not config.patches:
+    elif config.cordis is not None and not config.cordis_has_patches_fallback:
         # A caller-supplied full-composition override has no equivalent on
         # this SDK shape — silently dropping it would silently downgrade
         # whatever behavior (e.g. approval mode's fail-closed gate) that
         # composition was providing. Refuse instead.
         #
-        # When `patches` IS set alongside `cordis`, the caller (app.py's
-        # approval-mode wiring) has already supplied the new-shape
-        # equivalent composition — `cordis` here is just the OLD-shape
-        # artifact carried along for whichever SDK turns out to be
-        # installed, not a request we can't honor. Drop it silently in
-        # that case; only `patches` below is applied.
+        # `cordis_has_patches_fallback=True` is the caller's explicit
+        # declaration that `patches` already provides the SAME behavior as
+        # `cordis` for this specific composition (see the field's own
+        # docstring) — only app.py's approval-mode wiring sets it, so an
+        # unrelated caller-supplied `cordis` (e.g. a custom DSH_CORDIS) with
+        # no such declaration still fails loud here, even if `patches`
+        # happens to be non-empty for some unrelated reason.
         raise DshAdapterError(
             f"DSH_CORDIS is set to {config.cordis!r}, but the installed "
             "deepseek-harness-sdk no longer accepts a `cordis` kwarg (see "

@@ -51,6 +51,7 @@ async def _make_adapter(tmp_path, gateway: ApprovalGateway) -> DshAdapter:
             base_url=os.environ.get("DEEPSEEK_BASE_URL") or None,
             cordis=str(bundled_cordis_path()),
             patches=(str(bundled_approval_patch_path()),),
+            cordis_has_patches_fallback=True,
             request_timeout_seconds=120.0,
             env={
                 "DSH_APPROVAL_CALLBACK_URL": gateway.callback_url,

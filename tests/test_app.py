@@ -80,6 +80,11 @@ def test_approval_mode_starts_gateway_and_wires_the_harness_subprocess_env():
         assert adapter._config.cordis.endswith("cordis.yml")
         assert len(adapter._config.patches) == 1
         assert adapter._config.patches[0].endswith("approval.patch.yml")
+        # Declares the two artifacts above as functionally equivalent so a
+        # new-shape SDK (no `cordis` kwarg) can drop cordis for patches
+        # without _build_harness_config raising — see that function's
+        # docstring and dsh_adapter.DshAdapterConfig.cordis_has_patches_fallback.
+        assert adapter._config.cordis_has_patches_fallback is True
 
 
 def test_approval_mode_with_custom_cordis_raises():

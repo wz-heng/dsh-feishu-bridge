@@ -80,6 +80,28 @@ def test_new_shape_maps_session_root_to_dsh_home_verbatim(monkeypatch):
     assert built.dsh_home == "/tmp/sessions"
 
 
+def test_new_shape_resolves_a_relative_session_root_against_cwd(monkeypatch, tmp_path):
+    # Snape review, 2026-09-03: on the OLD SDK shape, a relative
+    # session_root is never resolved by the SDK at all — it's passed
+    # straight through as the DSH_SESSION_ROOT env var into the runtime
+    # subprocess, whose own cwd is `config.cwd` (deepseek_harness.api's
+    # runtime_cwd), so it lands under config.cwd via the bundled
+    # cordis.yml's `root: !!js process.env.DSH_SESSION_ROOT ?? './.sessions'`.
+    # The new SDK resolves dsh_home ITSELF, but against the Python bridge
+    # process's own cwd (deepseek_harness.client), not config.cwd — a
+    # DIFFERENT directory whenever the bridge is launched from somewhere
+    # other than the configured dsh workspace. Forwarding verbatim would
+    # silently relocate (and in effect lose) existing sessions on any
+    # deployment where those two directories differ; resolving against
+    # config.cwd here keeps the location identical across both shapes.
+    monkeypatch.setattr(dsh_adapter_module, "DeepSeekHarnessConfig", _NewShapeConfig)
+    config = DshAdapterConfig(cwd=str(tmp_path), session_root="sessions")
+
+    built = _build_harness_config(config)
+
+    assert built.dsh_home == str((tmp_path / "sessions").resolve())
+
+
 def test_new_shape_falls_back_to_a_default_dsh_home_when_unset(monkeypatch, tmp_path):
     monkeypatch.setattr(dsh_adapter_module, "DeepSeekHarnessConfig", _NewShapeConfig)
     config = DshAdapterConfig(cwd=str(tmp_path))
@@ -122,26 +144,47 @@ def test_new_shape_raises_on_unsupported_custom_cordis(monkeypatch):
         _build_harness_config(config)
 
 
-def test_new_shape_drops_cordis_silently_when_patches_supplies_the_equivalent(monkeypatch):
+def test_new_shape_drops_cordis_silently_when_patches_fallback_is_declared(monkeypatch):
     # This is exactly app.py's approval-mode wiring: it always sets BOTH
     # cordis (bundled_cordis_path(), for the old shape) and patches
     # (bundled_approval_patch_path(), for the new shape) on the same
-    # DshAdapterConfig and lets capability detection pick the one the
-    # installed SDK actually supports. On the new shape, cordis has no
-    # field to land in — but unlike the bare-cordis case above, there IS a
-    # new-shape equivalent already supplied via patches, so this must NOT
-    # raise (caught live by the SDK canary against 0.1.2a3: the old code
-    # raised unconditionally here, breaking approval mode on any new-shape
-    # SDK even though patches was already wired correctly).
+    # DshAdapterConfig, plus cordis_has_patches_fallback=True to declare
+    # the two artifacts functionally equivalent, and lets capability
+    # detection pick the one the installed SDK actually supports. On the
+    # new shape, cordis has no field to land in — but unlike the
+    # bare-cordis case above, there IS a declared new-shape equivalent via
+    # patches, so this must NOT raise (caught live by the SDK canary
+    # against 0.1.2a3: the original code raised unconditionally here,
+    # breaking approval mode on any new-shape SDK even though patches was
+    # already wired correctly).
     monkeypatch.setattr(dsh_adapter_module, "DeepSeekHarnessConfig", _NewShapeConfig)
     config = DshAdapterConfig(
-        cordis="/tmp/cordis.yml", patches=("/tmp/approval.patch.yml",)
+        cordis="/tmp/cordis.yml",
+        patches=("/tmp/approval.patch.yml",),
+        cordis_has_patches_fallback=True,
     )
 
     built = _build_harness_config(config)
 
     assert built.patches == ("/tmp/approval.patch.yml",)
     assert not hasattr(built, "cordis")
+
+
+def test_new_shape_still_raises_on_cordis_with_unrelated_patches_and_no_fallback_flag(monkeypatch):
+    # Tightened per Snape review (2026-09-03): a non-empty `patches` alone
+    # must NOT be enough to silently drop an unrelated caller-supplied
+    # `cordis` — only an explicit cordis_has_patches_fallback=True
+    # declaration (set exclusively by app.py's approval-mode wiring, which
+    # knows the two artifacts are equivalent) may do that. Without the
+    # flag, this must still fail loud even though `patches` happens to be
+    # non-empty, since nothing here proves it's a stand-in for `cordis`.
+    monkeypatch.setattr(dsh_adapter_module, "DeepSeekHarnessConfig", _NewShapeConfig)
+    config = DshAdapterConfig(
+        cordis="/tmp/custom-cordis.yml", patches=("/tmp/unrelated.patch.yml",)
+    )
+
+    with pytest.raises(DshAdapterError, match="DSH_CORDIS"):
+        _build_harness_config(config)
 
 
 def test_field_probe_is_cached(monkeypatch):
