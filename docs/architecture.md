@@ -134,6 +134,66 @@ travel back over loopback before the relay gives up on its own; the relay's
 timeout is purely a backstop for "the callback never reaches the gateway at
 all," which the gateway-side timeout structurally cannot cover.
 
+## SDK compat: `cordis`/`session_root` vs. `profile`/`patches`/`dsh_home`
+
+`deepseek-harness-sdk` 0.1.2a3 (an alpha pre-release; the SDK canary
+installs it unpinned — see README) dropped `DeepSeekHarnessConfig.cordis`
+and `.session_root` for `.profile`/`.patches`/`.dsh_home`. The pinned range
+this repo ships (0.1.0rc6–0.1.1rc1) still has the old shape, so
+`dsh_adapter._build_harness_config` probes the INSTALLED SDK's actual
+`DeepSeekHarnessConfig` fields via `inspect.signature` (cached — see
+`_harness_config_field_names`) and builds whichever shape it supports,
+rather than branching on a parsed version number — a future pre-release
+could rename fields again, and this keeps working without another code
+change.
+
+Two things don't translate 1:1, verified by actually installing 0.1.2a3 +
+the matching `deepseek-harness-runtime-bin` into an isolated venv and
+booting the real runtime (not just reading source):
+
+- **`session_root` → `dsh_home` is role-equivalent, not byte-identical.**
+  The old `session_root` pointed directly at the JSONL storage directory.
+  The new `dsh_home` is a broader "harness home" (session JSONLs land one
+  level down, at `$dsh_home/sessions`) and — unlike the old implicit
+  `./.sessions` default — is now MANDATORY; the SDK never falls back to
+  `~/.dsh`. `_build_harness_config` passes `session_root`'s value straight
+  through as `dsh_home` (same directory now anchors more state, not just
+  sessions) and falls back to `<cwd>/.dsh-home` when unset, so `dsh_home`
+  is never omitted.
+- **`cordis` (full composition) → `profile` + `patches` (named profile +
+  overlay).** The old `cordis` kwarg pointed at a file that fully replaced
+  the plugin composition (`DSH_CORDIS_CONFIG`). The new model boots a
+  named, pre-materialized `profile` (default `"sdk"`) and applies
+  `patches` — a tuple of overlay YAML files using the SAME id-targeted
+  insert/config-override/disable format this repo's own top-level
+  `cordis.patch.yml` already uses — on top of it. `"sdk"`'s new default is
+  a much richer agent than the old bundled default (subagents, web tools,
+  skills, and a SANDBOXED bash executor, `@deepseek-ai/dsh-bash-sandbox`,
+  in place of the old unconfined `@deepseek-ai/dsh-bash-local`). Rather
+  than fight that — an attempt to reassemble the old minimal
+  `@deepseek-ai/dsh-agent-spine-demo` composition standalone under the new
+  model surfaced an undocumented `loader` service-dependency risk (it's
+  normally layered under `@deepseek-ai/dsh-base`, which supplies that
+  service) — approval mode's new-SDK path (`approval_runtime/
+  approval.patch.yml`, distinct from the old full-composition
+  `cordis.yml`) leaves the runtime's own `"sdk"` profile untouched and
+  patches in only the two first-party approval plugins, plus an explicit
+  `{id: approval, config: {policy: ask}}` override (defense in depth —
+  don't rely on the new profile's own default policy never drifting).
+  `approval-relay.mjs` and `pre-execute-gate.mjs` needed NO code changes:
+  a live `harness.start()` against the patched `"sdk"` profile booted
+  cleanly, and both plugins already key off stable, version-independent
+  extension points (`tools/pre-execute`, `approval/request`) and the tool
+  NAME `'bash'` rather than a specific executor plugin — their own module
+  docstrings already anticipated `@deepseek-ai/dsh-tool-bash` alongside the
+  old `dsh-bash-local`.
+
+`pyproject.toml`'s pin stays at `0.1.0rc6` — this task's research covered
+the 0.1.2a3 signature break specifically, not a behavior audit of
+0.1.0rc7/0.1.1rc1 (both otherwise still old-shaped), so bumping the pin is
+left as its own, separately-tested decision rather than a side effect of
+this compat shim.
+
 ## Why sticky sessions don't survive a restart
 
 `docs/user/guide/python-sdk.md` confirms session continuity *within* one

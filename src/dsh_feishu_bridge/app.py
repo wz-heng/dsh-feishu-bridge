@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 
 from .approval_gateway import ApprovalGateway
-from .approval_runtime import bundled_cordis_path
+from .approval_runtime import bundled_approval_patch_path, bundled_cordis_path
 from .bridges.feishu import build_feishu_bridge
 from .bridges.manager import BridgeManager
 from .config import Settings
@@ -79,6 +79,7 @@ def build_app(settings: Settings) -> FastAPI:
     # for why `cordis` below is never both bundled and caller-supplied.
     env: dict[str, str] = {}
     cordis = settings.dsh_cordis
+    patches: tuple[str, ...] = ()
     if settings.dsh_approval_mode:
         if settings.dsh_cordis:
             # load_settings() already rejects this combination (config.py) —
@@ -89,7 +90,13 @@ def build_app(settings: Settings) -> FastAPI:
                 "approval mode ships its own runtime composition; see README "
                 "'Remote tool approval' for how to combine the two."
             )
+        # Both artifacts are always wired: the installed SDK's actual
+        # field set decides which one lands on the wire
+        # (dsh_adapter._build_harness_config) — cordis (full composition)
+        # on the old shape, patches (overlay) on the new one. See
+        # approval_runtime/__init__.py.
         cordis = str(bundled_cordis_path())
+        patches = (str(bundled_approval_patch_path()),)
 
     adapter = DshAdapter(
         DshAdapterConfig(
@@ -101,6 +108,7 @@ def build_app(settings: Settings) -> FastAPI:
             cwd=settings.dsh_workspace,
             session_root=settings.dsh_session_root,
             cordis=cordis,
+            patches=patches,
             env=env,
         )
     )

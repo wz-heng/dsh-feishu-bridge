@@ -15,13 +15,24 @@ no API quota and needs no key, which is exactly what makes it a canary
 tripwire: it's the one place a `deepseek-harness-sdk` constructor/signature
 break shows up under a freshly-installed *latest* SDK
 (.github/workflows/canary.yml) without a DEEPSEEK_API_KEY secret.
+
+Goes through ``dsh_adapter._build_harness_config`` — the SAME
+capability-detected translation ``DshAdapter._ensure_started`` uses — rather
+than hand-rolling ``DeepSeekHarnessConfig(...)`` kwargs directly: that's
+exactly what broke against 0.1.2a3 (``session_root``/``cordis`` dropped for
+``dsh_home``/``profile``/``patches``, see dsh_adapter.py's "SDK-version
+compat shim" docstring) while this test still hardcoded the old shape,
+letting canary go red with no local repro. Testing through the real
+translation means this test tracks whatever SDK is actually installed —
+the pinned range locally, whatever the canary upgrades to in CI — without
+needing to know which shape it is.
 """
 
 from __future__ import annotations
 
-from deepseek_harness import DeepSeekHarness, DeepSeekHarnessConfig
+from deepseek_harness import DeepSeekHarness
 
-from dsh_feishu_bridge.dsh_adapter import DshAdapterConfig
+from dsh_feishu_bridge.dsh_adapter import DshAdapterConfig, _build_harness_config
 
 
 def test_real_harness_constructs_from_adapter_config_fields(monkeypatch):
@@ -53,20 +64,7 @@ def test_real_harness_constructs_from_adapter_config_fields(monkeypatch):
         env={},
     )
 
-    harness = DeepSeekHarness(
-        DeepSeekHarnessConfig(
-            provider=adapter_config.provider,
-            model=adapter_config.model,
-            max_tokens=adapter_config.max_tokens,
-            api_key=adapter_config.api_key,
-            base_url=adapter_config.base_url,
-            cwd=adapter_config.cwd,
-            session_root=adapter_config.session_root,
-            cordis=adapter_config.cordis,
-            request_timeout_seconds=adapter_config.request_timeout_seconds,
-            env=dict(adapter_config.env),
-        )
-    )
+    harness = DeepSeekHarness(_build_harness_config(adapter_config))
 
     assert harness.config.provider == "deepseek-official"
     assert harness.config.model == "deepseek-v4-flash"

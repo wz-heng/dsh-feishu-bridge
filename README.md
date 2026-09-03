@@ -14,7 +14,7 @@ A Feishu (Lark) channel bridge for [DeepSeek Harness](https://github.com/deepsee
 ## What this is
 
 - A production-grade Feishu bot bridge: fail-closed allowlist, one-time card nonces, per-chat verbosity, sticky sessions, both `ws` and `webhook` transports.
-- The thin adapter that talks to `deepseek-harness-sdk` lives in one file, `src/dsh_feishu_bridge/dsh_adapter.py`, and the SDK version is pinned exactly — the harness is a v0.1 developer preview that documents breaking changes between releases.
+- The thin adapter that talks to `deepseek-harness-sdk` lives in one file, `src/dsh_feishu_bridge/dsh_adapter.py`, and the SDK version is pinned exactly — the harness is a v0.1 developer preview that documents breaking changes between releases. That same adapter also carries a small capability-detection shim (probes the installed SDK's actual `DeepSeekHarnessConfig` fields via `inspect.signature`, never a hardcoded version check) so the nightly SDK canary — which installs the latest pre-release unpinned — keeps passing across a breaking field rename instead of just going red; see `docs/architecture.md` "SDK compat".
 
 ## Screenshots
 

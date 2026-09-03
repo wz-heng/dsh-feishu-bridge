@@ -39,20 +39,78 @@ python-sdk.md @ deepseek-ai/deepseek-harness master, verified 2026-08-14):
   process. Cross-restart resume via ``session_root``'s JSONL log is
   mentioned but not documented as a supported resume path, so this adapter
   does not rely on it — a bridge restart starts fresh sessions on purpose.
+
+SDK-version compat shim (added for the ``deepseek-harness-sdk`` 0.1.2a3
+canary break, verified 2026-09-02 by installing 0.1.2a3 +
+``deepseek-harness-runtime-bin`` 0.1.2a3 into an isolated venv and actually
+booting the runtime, not just reading source):
+
+- 0.1.0rc6 through 0.1.1rc1 (the pinned range) all share the OLD
+  ``DeepSeekHarnessConfig`` shape this module originally documented:
+  ``session_root`` (a JSONL storage directory, implicitly ``./.sessions``
+  when unset) and ``cordis`` (a path to a FULL replacement plugin
+  composition file, wired through the ``DSH_CORDIS_CONFIG`` env var).
+- 0.1.2a3 dropped both in favor of ``dsh_home`` + ``profile`` + ``patches``.
+  ``dsh_home`` is a broader "harness home" directory (session JSONLs live
+  under ``$dsh_home/sessions``, not directly in it) and is now MANDATORY —
+  the SDK never falls back to ``~/.dsh`` implicitly, so omitting it raises
+  at runtime start. ``profile`` selects a named, pre-materialized plugin
+  composition (built-in default: ``"sdk"``, already a much richer agent
+  than the old bundled default — subagents, web tools, skills, a sandboxed
+  bash executor instead of the old unconfined one). ``patches`` is a tuple
+  of overlay YAML files (id-targeted insert/config-override/disable
+  operations — the SAME format this repo's own top-level
+  ``cordis.patch.yml`` already uses) applied on top of the selected
+  profile.
+- ``_build_harness_config`` below probes the INSTALLED SDK's actual
+  ``DeepSeekHarnessConfig`` field set via ``inspect.signature`` (cached —
+  see ``_harness_config_field_names``) and builds whichever kwarg shape it
+  supports, rather than branching on a parsed version number: the harness
+  SDK is an explicit "developer preview" that documents breaking changes
+  between pre-releases, so a future 0.1.3/0.2 could rename fields again,
+  and capability probing keeps working without another code change (the
+  SDK canary, ``.github/workflows/canary.yml``, installs the latest
+  pre-release unpinned specifically to catch this early).
+- For approval mode specifically: rather than replicate the OLD bundled
+  default composition (``@deepseek-ai/dsh-agent-spine-demo`` +
+  unconfined ``dsh-bash-local``) under the new profile/patch model — which
+  a live boot test showed only resolves with undocumented risk (dropping
+  the ``@deepseek-ai/dsh-base`` bundle it's normally layered under trips a
+  missing ``loader`` service dependency warning) — the new-SDK path adopts
+  the runtime's own unmodified default ``"sdk"`` profile and patches in
+  ONLY the two first-party approval plugins (``approval_runtime/
+  approval.patch.yml``, distinct from the old full-composition
+  ``approval_runtime/cordis.yml``). A live ``harness.start()`` against a
+  real 0.1.2a3 runtime confirmed this boots cleanly and that
+  ``approval-relay.mjs``/``pre-execute-gate.mjs`` need no code changes:
+  both already key off stable, version-independent extension points
+  (``tools/pre-execute``, ``approval/request``) and a stable tool NAME
+  (``'bash'``), not a specific executor plugin — see those files' own
+  module docstrings, which already anticipated
+  ``@deepseek-ai/dsh-tool-bash`` alongside the old ``dsh-bash-local``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import uuid
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Protocol
 
 from deepseek_harness import DeepSeekHarness, DeepSeekHarnessConfig
 from deepseek_harness.errors import HarnessError
 
 logger = logging.getLogger(__name__)
+
+# Fallback directory name for the new SDK's mandatory `dsh_home` when the
+# caller never configured `session_root` — same spirit as the old bundled
+# composition's implicit `./.sessions` default, just under the broader
+# "harness home" concept the new SDK introduced (see module docstring).
+_DEFAULT_DSH_HOME_DIRNAME = ".dsh-home"
 
 
 class DshAdapterError(Exception):
@@ -98,8 +156,85 @@ class DshAdapterConfig:
     cwd: str | None = None
     session_root: str | None = None
     cordis: str | None = None
+    # Overlay patch files applied on top of the SDK's default profile — the
+    # new-SDK equivalent of `cordis` for additive customization (see module
+    # docstring's "SDK-version compat shim"). Ignored (and left unset) under
+    # an SDK old enough that `cordis` alone is still the full-composition
+    # mechanism.
+    patches: tuple[str, ...] = ()
     request_timeout_seconds: float | None = 300.0
     env: dict[str, str] = field(default_factory=dict)
+
+
+@lru_cache(maxsize=1)
+def _harness_config_field_names() -> frozenset[str]:
+    """Cached probe of the fields the INSTALLED ``DeepSeekHarnessConfig``
+    actually accepts — see module docstring's "SDK-version compat shim".
+    Cached because it never changes within a process (the installed SDK
+    doesn't change at runtime), and because this makes the probe itself
+    trivially free after the first ``DshAdapter`` construction, e.g. under
+    ``pytest -q`` where many tests each build their own adapter.
+    """
+    return frozenset(inspect.signature(DeepSeekHarnessConfig).parameters)
+
+
+def _default_dsh_home(cwd: str | None) -> str:
+    """Fallback ``dsh_home`` for the new SDK when ``session_root`` was never
+    configured. Resolved to an absolute path ourselves, against ``cwd``
+    (the runtime subprocess's own working directory) — not left as a bare
+    relative string, since ``DeepSeekHarnessConfig.dsh_home`` gets resolved
+    SDK-side against the Python *interpreter's* cwd
+    (``Path(...).expanduser().resolve()`` in ``deepseek_harness.client``),
+    which would make the effective location depend on wherever the bridge
+    process happened to be launched from.
+    """
+    base = Path(cwd) if cwd else Path.cwd()
+    return str(base.resolve() / _DEFAULT_DSH_HOME_DIRNAME)
+
+
+def _build_harness_config(config: DshAdapterConfig) -> DeepSeekHarnessConfig:
+    """Translate :class:`DshAdapterConfig` into the installed SDK's actual
+    ``DeepSeekHarnessConfig`` shape (see module docstring's "SDK-version
+    compat shim"). Capability-detected via ``_harness_config_field_names``,
+    never branched on a parsed version number.
+    """
+    fields = _harness_config_field_names()
+    kwargs: dict[str, object] = {
+        "provider": config.provider,
+        "model": config.model,
+        "max_tokens": config.max_tokens,
+        "api_key": config.api_key,
+        "base_url": config.base_url,
+        "cwd": config.cwd,
+        "request_timeout_seconds": config.request_timeout_seconds,
+        "env": dict(config.env),
+    }
+
+    if "session_root" in fields:
+        kwargs["session_root"] = config.session_root
+    if "dsh_home" in fields:
+        # Mandatory on this SDK shape — never omit it, even when the caller
+        # never configured session_root (see _default_dsh_home).
+        kwargs["dsh_home"] = config.session_root or _default_dsh_home(config.cwd)
+
+    if "cordis" in fields:
+        kwargs["cordis"] = config.cordis
+    elif config.cordis is not None:
+        # A caller-supplied full-composition override has no equivalent on
+        # this SDK shape — silently dropping it would silently downgrade
+        # whatever behavior (e.g. approval mode's fail-closed gate) that
+        # composition was providing. Refuse instead.
+        raise DshAdapterError(
+            f"DSH_CORDIS is set to {config.cordis!r}, but the installed "
+            "deepseek-harness-sdk no longer accepts a `cordis` kwarg (see "
+            "dsh_adapter.py's SDK-version compat shim docstring) — a full "
+            "composition override isn't supported against this SDK version. "
+            "Drop DSH_CORDIS, or pin to an SDK release that still has it."
+        )
+    if "patches" in fields and config.patches:
+        kwargs["patches"] = config.patches
+
+    return DeepSeekHarnessConfig(**{name: value for name, value in kwargs.items() if name in fields})
 
 
 class DshAdapter:
@@ -129,20 +264,7 @@ class DshAdapter:
             return self._harness
         async with self._start_lock:
             if self._harness is None:
-                harness = DeepSeekHarness(
-                    DeepSeekHarnessConfig(
-                        provider=self._config.provider,
-                        model=self._config.model,
-                        max_tokens=self._config.max_tokens,
-                        api_key=self._config.api_key,
-                        base_url=self._config.base_url,
-                        cwd=self._config.cwd,
-                        session_root=self._config.session_root,
-                        cordis=self._config.cordis,
-                        request_timeout_seconds=self._config.request_timeout_seconds,
-                        env=dict(self._config.env),
-                    )
-                )
+                harness = DeepSeekHarness(_build_harness_config(self._config))
                 await asyncio.to_thread(harness.start)
                 self._harness = harness
         return self._harness

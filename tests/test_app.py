@@ -78,6 +78,8 @@ def test_approval_mode_starts_gateway_and_wires_the_harness_subprocess_env():
         assert expected_ms > 12000
         assert adapter._config.cordis is not None
         assert adapter._config.cordis.endswith("cordis.yml")
+        assert len(adapter._config.patches) == 1
+        assert adapter._config.patches[0].endswith("approval.patch.yml")
 
 
 def test_approval_mode_with_custom_cordis_raises():

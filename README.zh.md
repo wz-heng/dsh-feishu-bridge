@@ -14,7 +14,7 @@ SDK 金丝雀每天对 `deepseek-harness-sdk`、`lark-channel-sdk` 的**最新**
 ## 这是什么
 
 - 一套生产级飞书机器人桥：fail-closed 白名单、一次性卡片 nonce、per-chat 输出详略、sticky session、`ws`/`webhook` 双 transport。
-- 与 `deepseek-harness-sdk` 对话的薄适配层集中在一个文件 `src/dsh_feishu_bridge/dsh_adapter.py`，SDK 版本精确锁定——harness 目前是 v0.1 developer preview，版本间明示会有破坏性变更。
+- 与 `deepseek-harness-sdk` 对话的薄适配层集中在一个文件 `src/dsh_feishu_bridge/dsh_adapter.py`，SDK 版本精确锁定——harness 目前是 v0.1 developer preview，版本间明示会有破坏性变更。同一个适配层还带一个小的能力探测兼容层（用 `inspect.signature` 探测已安装 SDK 实际接受的 `DeepSeekHarnessConfig` 字段，绝不按版本号硬编码分支），让每晚跑最新预发布版本的 SDK 金丝雀在字段被上游改名后依然能过，而不是直接转红；细节见 `docs/architecture.md` 的 "SDK compat" 一节。
 
 ## 截图
 

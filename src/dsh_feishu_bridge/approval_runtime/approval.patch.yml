@@ -1,0 +1,32 @@
+# dsh-feishu-bridge approval-mode overlay for SDKs new enough to use the
+# profile+patches composition model (deepseek-harness-sdk >= 0.1.2, see
+# dsh_adapter.py's "SDK-version compat shim" docstring) instead of the old
+# full-composition `cordis` kwarg. Unlike cordis.yml (a full replacement
+# plugin list, used verbatim on the old SDK shape), this is a PATCH —
+# applied on top of the runtime's own unmodified default `"sdk"` profile via
+# `DeepSeekHarnessConfig.patches`, in this same id-targeted
+# insert/config-override/disable format this repo's own top-level
+# cordis.patch.yml already uses.
+#
+# - `approval`: the default `"sdk"` profile already composes
+#   `@deepseek-ai/dsh-user-approval` with `policy: ask` by default, but that
+#   default is upstream's to change; pin it explicitly here rather than
+#   relying on it never drifting — approval mode's fail-closed guarantee
+#   must not silently degrade if a future runtime release changes it.
+# - `approval-pre-execute-gate` / `approval-relay`: same two first-party
+#   plugins the old cordis.yml composed, unmodified — both key off stable,
+#   version-independent extension points (`tools/pre-execute`,
+#   `approval/request`) and the tool NAME `'bash'`, not a specific executor
+#   plugin, so they need no changes for the new profile's sandboxed bash
+#   executor (`@deepseek-ai/dsh-bash-sandbox` in place of the old unconfined
+#   `@deepseek-ai/dsh-bash-local`) — verified by actually booting a real
+#   0.1.2a3 runtime against this composition (dsh_adapter.py docstring).
+- id: approval
+  config:
+    policy: ask
+
+- insert:
+    - id: approval-pre-execute-gate
+      name: ./pre-execute-gate.mjs
+    - id: approval-relay
+      name: ./approval-relay.mjs

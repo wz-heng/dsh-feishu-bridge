@@ -21,7 +21,7 @@ import pytest
 
 from dsh_feishu_bridge.app import _APPROVAL_RELAY_TIMEOUT_MARGIN_SECONDS, _merge_no_proxy
 from dsh_feishu_bridge.approval_gateway import ApprovalGateway
-from dsh_feishu_bridge.approval_runtime import bundled_cordis_path
+from dsh_feishu_bridge.approval_runtime import bundled_approval_patch_path, bundled_cordis_path
 from dsh_feishu_bridge.dsh_adapter import DshAdapter, DshAdapterConfig
 
 pytestmark = [
@@ -50,6 +50,7 @@ async def _make_adapter(tmp_path, gateway: ApprovalGateway) -> DshAdapter:
             api_key=os.environ["DEEPSEEK_API_KEY"],
             base_url=os.environ.get("DEEPSEEK_BASE_URL") or None,
             cordis=str(bundled_cordis_path()),
+            patches=(str(bundled_approval_patch_path()),),
             request_timeout_seconds=120.0,
             env={
                 "DSH_APPROVAL_CALLBACK_URL": gateway.callback_url,
