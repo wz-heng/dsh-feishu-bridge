@@ -4,6 +4,7 @@ English | [中文](README.zh.md)
 
 [![CI](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/ci.yml)
 [![SDK canary](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/canary.yml/badge.svg)](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/canary.yml)
+[![Listed on DSH Directory](https://dsh.directory/badges/listed.svg)](https://dsh.directory/plugins/wz-heng/dsh-feishu-bridge)
 
 The SDK canary runs daily against the *latest* `deepseek-harness-sdk` and `lark-channel-sdk` releases (not the pinned versions this repo ships), so a breaking upstream change gets caught within a day instead of silently bit-rotting.
 

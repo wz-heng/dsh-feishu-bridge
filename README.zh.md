@@ -4,6 +4,7 @@
 
 [![CI](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/ci.yml)
 [![SDK canary](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/canary.yml/badge.svg)](https://github.com/wz-heng/dsh-feishu-bridge/actions/workflows/canary.yml)
+[![Listed on DSH Directory](https://dsh.directory/badges/listed.svg)](https://dsh.directory/plugins/wz-heng/dsh-feishu-bridge)
 
 SDK 金丝雀每天对 `deepseek-harness-sdk`、`lark-channel-sdk` 的**最新**版本（而非本仓库锁定的版本）跑一遍全套测试，上游一旦引入破坏性变更，一天内就能发现。
 
